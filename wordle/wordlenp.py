@@ -3,27 +3,30 @@ import numpy as np
 
 
 class Wordle:
-    """Main Wordle game taking optional arguments of the answer and whether to check against the dictionary.
-        random_daily changes answer every day (see github/preritdas/wordle)."""
-
     def __init__(
-        self, answer: str = 'hello',
+        self,
+        answer,
         real_words: bool = True,
-        vocabulary: set = None,
-        max_guesses: int = 6
+        vocabulary_path: str = 'wordle/guesses.txt',
+        max_guesses: int = 6,
+        need_preproc = False
     ):
         # for fast operations
-        self.answer = self._tonumpy(answer)
+        self.need_preproc = need_preproc
+        self.answer = self._prepoc(answer)
 
+        # load from path:
+        self.vocabulary: set = self._load_vocabulary(vocabulary_path)
+        
         # check `vocabulary` and `answer` consistency
         if real_words:
-            if vocabulary is None:
+            if self.vocabulary is None:
                 raise ValueError(
                     '`vocabulary` must be provided in case `real_words` is True')
-            if answer not in vocabulary:
+            if answer not in self.vocabulary:
                 raise ValueError('`answer` must be in `vocabulary`')
         self.real_words = real_words
-        self.vocabulary = copy(vocabulary)
+        
 
         # Individual guesses
         self.guesses = []
@@ -39,13 +42,15 @@ class Wordle:
     # Individual guesses
     def send_guess(
         self,
-        guess: np.ndarray,
+        guess: str,
         logging: bool = True
     ):
         # if game is over
-        if self.win is not None:
+        if self.isover():
             raise StopIteration(
                 f"You have already {'won' if self.win else 'lost'}.")
+
+        guess = self._prepoc(guess)
 
         # guess logging
         if logging:
@@ -63,7 +68,10 @@ class Wordle:
         elif len(self.guesses) == self.max_guesses:
             self.win = False
 
-        return pattern, iscorrect
+        return pattern
+    
+    def isover(self):
+        return self.win is not None
 
     @staticmethod
     def _tonumpy(word: str):
@@ -72,6 +80,11 @@ class Wordle:
     @staticmethod
     def _tostr(array: np.ndarray):
         return ''.join(array)
+    
+    def _prepoc(self, word):
+        if self.need_preproc:
+            return self._tonumpy(word)
+        return word
 
     def _validate(self, word: np.ndarray):
         if not isinstance(word, np.ndarray):
@@ -114,7 +127,9 @@ class Wordle:
         # return pattern and flag that guess is equal to answer
         return pattern, is_green.all()
 
-    # Reset individual guesses
-    def reset_guesses(self):
-        """Removes all guesses from guess logging to allow 6 more attempts."""
-        self.individual_guesses = []
+    def reset(self, answer):
+        self.answer = answer
+        self.guesses = []
+
+    def _load_vocabulary(self, path, sep='\n'):
+        return set(open(path, mode='r').read().split(sep))
