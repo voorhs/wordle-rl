@@ -30,7 +30,7 @@ class Wordle(BaseWordle):
             else:
                 letters_left.append(a)
         iscorrect = len(letters_left) == 0
-        
+
         # find yellow letters
         for i, g in enumerate(guess):
             if pattern[i] is not None:   # green

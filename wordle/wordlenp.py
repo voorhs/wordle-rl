@@ -5,11 +5,11 @@ import numpy as np
 class Wordle:
     def __init__(
         self,
-        answer,
+        answer: str = 'hello',
         real_words: bool = True,
         vocabulary_path: str = 'wordle/guesses.txt',
         max_guesses: int = 6,
-        need_preproc = False
+        need_preproc=True
     ):
         # for fast operations
         self.need_preproc = need_preproc
@@ -17,7 +17,7 @@ class Wordle:
 
         # load from path:
         self.vocabulary: set = self._load_vocabulary(vocabulary_path)
-        
+
         # check `vocabulary` and `answer` consistency
         if real_words:
             if self.vocabulary is None:
@@ -26,9 +26,7 @@ class Wordle:
             if answer not in self.vocabulary:
                 raise ValueError('`answer` must be in `vocabulary`')
         self.real_words = real_words
-        
 
-        # Individual guesses
         self.guesses = []
         if max_guesses <= 0:
             raise ValueError(f'`max_guesses` must be positive: {max_guesses}')
@@ -39,7 +37,6 @@ class Wordle:
         # False: ran out of attempts
         self.win: bool = None
 
-    # Individual guesses
     def send_guess(
         self,
         guess: str,
@@ -69,18 +66,18 @@ class Wordle:
             self.win = False
 
         return pattern
-    
+
     def isover(self):
         return self.win is not None
 
     @staticmethod
     def _tonumpy(word: str):
         return np.array(list(word.lower()), dtype=np.object_)
-    
+
     @staticmethod
     def _tostr(array: np.ndarray):
         return ''.join(array)
-    
+
     def _prepoc(self, word):
         if self.need_preproc:
             return self._tonumpy(word)
@@ -89,7 +86,7 @@ class Wordle:
     def _validate(self, word: np.ndarray):
         if not isinstance(word, np.ndarray):
             raise ValueError(f"Not an array was given: {word}")
-        
+
         iterator = (len(c) != 1 for c in word)
         char_len_errors = np.fromiter(iterator, bool)
         if char_len_errors.any():
