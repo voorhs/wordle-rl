@@ -199,13 +199,12 @@ class Environment:
         # it's better to remember letters
         self.collected = {color: set() for color in ['B', 'Y', 'G']}
 
-    def step(self, action: BaseAction):
+    def step(self, action: BaseAction, output=None):
         # convert action to str guess
         guess = action.get_word()
 
         # send guess to Wordle instance
         pattern = self.wordle.send_guess(guess)
-        # print(pattern)
 
         # compute reward from pattern
         reward = self._reward(guess, pattern)
@@ -213,9 +212,20 @@ class Environment:
         # get to next state of environment
         self.state.step(guess, pattern)
 
-        # *collect statistics*
+        if output is not None:
+            # print coloring to output file
+            with open(output, mode='a') as f:
+                for i, p in enumerate(pattern):
+                    if p == 'B':
+                        f.write('{:^7}'.format(guess[i].upper()))
+                    elif p == 'Y':
+                        f.write('{:^7}'.format('*'+guess[i].upper()+'*'))
+                    elif p == 'G':
+                        f.write('{:^7}'.format('**'+guess[i].upper()+'**'))
+                f.write('\n')   # end of word line
+                if self.isover():
+                    f.write('\n')   # end of wordle board
 
-        # return reward for action and flattened vector of new state
         return self.state.copy(), reward, self.isover()
 
     def _reward(self, guess, pattern):

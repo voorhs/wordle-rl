@@ -4,33 +4,27 @@ import numpy as np
 class Wordle:
     def __init__(
         self,
-        answer: str = 'hello',
         real_words: bool = True,
-        vocabulary_path: str = 'wordle/guesses.txt',
-        answers_path: str = 'wordle/answers.txt',
+        vocabulary = 'wordle/guesses.txt',
+        answers = 'wordle/answers.txt',
         max_guesses: int = 6,
         need_preproc=True
     ):
         # for fast operations
         self.need_preproc = need_preproc
-        self.answer = self._prepoc(answer)
 
-        # load from path:
-        self.vocabulary: set = self._load_vocabulary(vocabulary_path)
-        self.answers: list = self._load_vocabulary(answers_path, astype=list)
+        # load guesses and answers
+        self.real_words = real_words
+        self.vocabulary = set(vocabulary)
+        self.answers = list(answers)
+        if isinstance(vocabulary, str):
+            # load from path
+            self.vocabulary: set = self._load_vocabulary(vocabulary)
+            self.answers: list = self._load_vocabulary(answers, astype=list)
         
         # to generate answers randomly we sample words
         # from `self.answers` in advance and iterate through them
         self.current_answer = -1
-
-        # check `vocabulary` and `answer` consistency
-        if real_words:
-            if self.vocabulary is None:
-                raise ValueError(
-                    '`vocabulary` must be provided in case `real_words` is True')
-            if answer not in self.vocabulary:
-                raise ValueError('`answer` must be in `vocabulary`')
-        self.real_words = real_words
 
         self.guesses = []
         if max_guesses <= 0:
@@ -143,7 +137,7 @@ class Wordle:
             self.answers_sequence = self._sample_answers(replace)
         
         # update answer for new game
-        self.asnwer = self.answers_sequence[self.current_answer]
+        self.answer = self._prepoc(self.answers_sequence[self.current_answer])
     
     def _sample_answers(self, replace):
         indices = np.random.choice(

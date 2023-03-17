@@ -1,3 +1,5 @@
+# deeply inspired by https://github.com/Guillaume-Cr/lunar_lander_per/blob/master/replay_buffer.py
+
 import random
 from collections import namedtuple
 import numpy as np
