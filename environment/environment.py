@@ -1,7 +1,10 @@
 import numpy as np
-from collections import Counter, defaultdict
+import torch
+from collections import defaultdict
 from wordle.wordlenp import Wordle
 
+
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class BaseState:
     def step(self, guess, pattern):
@@ -15,7 +18,7 @@ class BaseState:
     def tovector(self):
         """Return vector view to put it into Q network."""
         raise NotImplementedError()
-    
+
     def copy(self):
         """Return deep copy of state instance."""
         raise NotImplementedError()
@@ -25,19 +28,21 @@ class BaseAction:
     def size(self):
         """Return size of action space."""
         raise NotImplementedError()
-    
+
     def set_action(self, nn_output):
         raise NotImplementedError()
 
     def get_word(self):
         """Return guess corresponding to action instance"""
         raise NotImplementedError()
-    
+
     def copy_like(self, nn_output):
         """Make new action instance of the same class."""
         raise NotImplementedError()
 
 # needs refactoring with torch and device
+
+
 class StateYesNo(BaseState):
     def __init__(self, answer: str = 'hello', steps=6):
         self.answer = answer
@@ -57,9 +62,18 @@ class StateYesNo(BaseState):
         #       no/yes;
         self.coloring = np.zeros((26, 5, 2))
 
+    @property
+    def size(self):
+        ans = 1  # number of steps left
+        for arr in [self.isknown, self.isin, self.coloring]:
+            ans += arr.size
+        return ans
+
     def tovector(self):
         # this vector is supposed to be input of DQN network
-        return np.r_[self.isknown, self.isin, self.coloring.ravel(), self.step].copy()
+        ans = np.r_[self.isknown, self.isin, self.coloring.ravel(), self.steps]
+        ans = torch.from_numpy(ans).float().to(DEVICE)
+        return ans
 
     def step(self, guess, pattern):
         self.steps += 1
@@ -138,10 +152,17 @@ class StateYesNo(BaseState):
         return copy
 
 
+VOCABULARY = Wordle._load_vocabulary('wordle/guesses.txt', astype=list)
+
+
 class ActionVocabulary(BaseAction):
-    def __init__(self, nn_output, vocabulary):
-        self.action = np.argmax(nn_output)
+    """Action is an index of word in list of possible answers."""
+
+    def __init__(self, nn_output, vocabulary=None):
+        self.value = np.argmax(nn_output)
         self.vocabulary = vocabulary
+        if vocabulary is None:
+            self.vocabulary = VOCABULARY
 
     def size(self):
         return len(self.vocabulary)
@@ -149,19 +170,18 @@ class ActionVocabulary(BaseAction):
     def set_action(self, nn_output):
         # nn_output is vector of size as number of all possible guesses
         # which entries contain estimated q values
-        self.action = np.argmax(nn_output)
+        self.value = np.argmax(nn_output)
 
     def get_word(self):
-        return self.vocabulary[self.action]
+        return self.vocabulary[self.value]
 
     def copy_like(self, nn_output):
         return ActionVocabulary(nn_output, self.vocabulary)
 
 
-# need to add word generation procedure in reset method
 class Environment:
     def __init__(
-        self, rewards: defaultdict, wordle: Wordle = None, state_instance: StateYesNo = None
+        self, rewards: defaultdict, wordle: Wordle = None, state_instance: BaseState = None
     ):
         # supposed to be dict with keys 'B', 'Y', 'G', 'win', 'lose', 'step'
         self.rewards = rewards
@@ -171,10 +191,13 @@ class Environment:
         if wordle is None:
             self.wordle = Wordle()
 
-        # instance of envorinent state, which we use for getting input for DQN network
+        # instance of envorinment state, which we use for getting input for DQN network
         self.state = state_instance
         if state_instance is None:
             self.state = StateYesNo(self.wordle.answer)
+
+        # it's better to remember letters
+        self.collected = {color: set() for color in ['B', 'Y', 'G']}
 
     def step(self, action: BaseAction):
         # convert action to str guess
@@ -182,10 +205,10 @@ class Environment:
 
         # send guess to Wordle instance
         pattern = self.wordle.send_guess(guess)
-        print(pattern)
+        # print(pattern)
 
         # compute reward from pattern
-        reward = self._reward(pattern)
+        reward = self._reward(guess, pattern)
 
         # get to next state of environment
         self.state.step(guess, pattern)
@@ -195,25 +218,25 @@ class Environment:
         # return reward for action and flattened vector of new state
         return self.state.copy(), reward, self.isover()
 
-    def _reward(self, pattern):
+    def _reward(self, guess, pattern):
         # if end of episode
         if self.isover():
-            if self.wordle.win:
-                return self.rewards['win']
-
-            return self.rewards['lose']
+            return self.rewards['win'] if self.wordle.win else self.rewards['lose']
 
         # reward (supposed to be negative) for any guess
         result = self.rewards['step']
 
         # reward for each letter
-        for color in pattern:
-            result += self.rewards[color]
+        for i, color in enumerate(pattern):
+            if guess[i] not in self.collected[color]:
+                result += self.rewards[color]
+                self.collected[color].add(guess[i])
         return result
 
-    def reset(self):
-        new_answer = None # generation procedure
-        self.state.reset(new_answer)
+    def reset(self, replace=True):
+        self.wordle.reset(replace)
+        self.state.reset(self.wordle.answer)
+        self.collected = {color: set() for color in ['B', 'Y', 'G']}
         return self.state.copy()
 
     # if current state is terminal

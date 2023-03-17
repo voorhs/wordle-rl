@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class QNetwork(nn.Module):
     """Actor (Policy) Model."""
 
@@ -15,7 +16,7 @@ class QNetwork(nn.Module):
         """
         super(QNetwork, self).__init__()
         self.seed = torch.manual_seed(seed)
-        self.fc1 = nn.Linear(state_size, 256)
+        self.fc1 = nn.Linear(state_size, 256, dtype=torch.float32)
         self.fc2 = nn.Linear(256, 128)
         self.fc3 = nn.Linear(128, action_size)
 

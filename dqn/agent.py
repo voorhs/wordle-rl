@@ -1,8 +1,8 @@
 import numpy as np
 import random
 
-from model import QNetwork
-from replay_buffer import ReplayBuffer
+from dqn.model import QNetwork
+from dqn.replay_buffer import ReplayBuffer
 from environment.environment import BaseAction, BaseState
 
 import torch
@@ -29,9 +29,8 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class Agent():
     """Interacts with and learns from the environment."""
 
-    def __init__(self, state_size, action_size, action_constructor, seed, compute_weights=False):
+    def __init__(self, state_size, action_size, action_constructor, seed=0, compute_weights=False):
         """Initialize an Agent object.
-
         Params
         ======
             state_size (int): dimension of each state
@@ -47,9 +46,9 @@ class Agent():
 
         # Q-Network
         self.qnetwork_local = QNetwork(
-            state_size, action_size, seed).to(device)
+            state_size, action_size, seed).float().to(device)
         self.qnetwork_target = QNetwork(
-            state_size, action_size, seed).to(device)
+            state_size, action_size, seed).float().to(device)
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=LR)
         self.criterion = nn.MSELoss()
         self.compute_weights = compute_weights
@@ -106,7 +105,7 @@ class Agent():
             self.qnetwork_local.train()
         else:
             # exploration action
-            nn_output = np.random.randn(self.action_size)   # change to torch
+            nn_output = torch.randn(self.action_size)   # change to torch
             
         return self.action_constructor(nn_output.cpu().data.numpy())
 
@@ -121,14 +120,14 @@ class Agent():
         states, actions, rewards, next_states, dones, weights, indices = sampling
 
         # Q-function
-        q_target = self.qnetwork_target(next_states.tovector())\
+        q_target = self.qnetwork_target(next_states)\
                         .detach().max(1)[0].unsqueeze(1)
 
         # discounted return
         expected_values = rewards + gamma * q_target * (1 - dones)
 
         # predicted return
-        output = self.qnetwork_local(states.tovector()).gather(1, actions)
+        output = self.qnetwork_local(states).gather(1, actions)
 
         loss = F.mse_loss(output, expected_values)
 

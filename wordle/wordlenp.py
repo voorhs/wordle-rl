@@ -1,4 +1,3 @@
-from copy import copy
 import numpy as np
 
 
@@ -8,6 +7,7 @@ class Wordle:
         answer: str = 'hello',
         real_words: bool = True,
         vocabulary_path: str = 'wordle/guesses.txt',
+        answers_path: str = 'wordle/answers.txt',
         max_guesses: int = 6,
         need_preproc=True
     ):
@@ -17,6 +17,11 @@ class Wordle:
 
         # load from path:
         self.vocabulary: set = self._load_vocabulary(vocabulary_path)
+        self.answers: list = self._load_vocabulary(answers_path, astype=list)
+        
+        # to generate answers randomly we sample words
+        # from `self.answers` in advance and iterate through them
+        self.current_answer = -1
 
         # check `vocabulary` and `answer` consistency
         if real_words:
@@ -124,9 +129,29 @@ class Wordle:
         # return pattern and flag that guess is equal to answer
         return pattern, is_green.all()
 
-    def reset(self, answer):
-        self.answer = answer
+    def reset(self, replace=True):
+        # reset inner data
         self.guesses = []
+        self.win = None
 
-    def _load_vocabulary(self, path, sep='\n'):
-        return set(open(path, mode='r').read().split(sep))
+        # move to next answer in list of sampled words
+        self.current_answer += 1
+        self.current_answer %= len(self.answers)
+        
+        if self.current_answer == 0:
+            # if sampled words are over make new sample
+            self.answers_sequence = self._sample_answers(replace)
+        
+        # update answer for new game
+        self.asnwer = self.answers_sequence[self.current_answer]
+    
+    def _sample_answers(self, replace):
+        indices = np.random.choice(
+            len(self.answers),
+            size=len(self.answers),
+            replace=replace)
+        return [self.answers[i] for i in indices]
+
+    @staticmethod
+    def _load_vocabulary(path, sep='\n', astype=set):
+        return astype(open(path, mode='r').read().split(sep))

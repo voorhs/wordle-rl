@@ -64,17 +64,16 @@ def train(
         # decrease exploration chance
         eps = max(eps_end, eps_decay * eps)
 
-        # progress print
-        print(
-            f'\nEpisode {i_episode:4d}',
-            f'Recent Average Score: {score_recent:.2f}',
-            f'Recent Success Rate: {100*success_recent:.1f}%',
-            sep='\t'
-        )
-
         if i_episode % 100 == 0:
+            # progress print
             elapsed_time = time.time() - start_time
-            print("Duration:", elapsed_time)
+            print(
+                f'\nEpisode {i_episode:4d}',
+                f'Average Score: {score_recent:.2f}',
+                f'Success Rate: {100*success_recent:.1f}%',
+                f'Duration: {elapsed_time:.1f}',
+                sep='\t'
+            )
 
         # save net params
         if i_episode % 5000 == 0:
