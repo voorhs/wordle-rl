@@ -1,4 +1,6 @@
-from copy import copy
+# deeply inspired by https://github.com/preritdas/wordle/blob/master/wordle/wordle.py
+
+
 import numpy as np
 from wordle.wordlenp import Wordle as BaseWordle
 

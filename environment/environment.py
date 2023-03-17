@@ -44,6 +44,7 @@ class BaseAction:
 
 
 class StateYesNo(BaseState):
+    # inspired by https://github.com/andrewkho/wordle-solver/blob/master/deep_rl/wordle/state.py
     def __init__(self, answer: str = 'hello', steps=6):
         self.answer = answer
 

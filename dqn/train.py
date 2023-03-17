@@ -1,3 +1,5 @@
+# deeply inspired by https://github.com/Guillaume-Cr/lunar_lander_per/blob/master/train_agent.py
+
 import torch
 import numpy as np
 

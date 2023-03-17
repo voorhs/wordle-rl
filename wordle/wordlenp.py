@@ -1,3 +1,5 @@
+# deeply inspired by https://github.com/preritdas/wordle/blob/master/wordle/wordle.py
+
 import numpy as np
 
 

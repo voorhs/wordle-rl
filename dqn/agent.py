@@ -1,3 +1,5 @@
+# deeply inspired by https://github.com/Guillaume-Cr/lunar_lander_per/blob/master/agent.py
+
 import numpy as np
 import random
 
