@@ -15,15 +15,15 @@ import math
 
 BUFFER_SIZE = int(1e5)      # replay buffer size
 BATCH_SIZE = 64             # minibatch size
-GAMMA = 0.99                # discount factor
+GAMMA = 1                   # discount factor
 TAU = 1e-3                  # for soft update of target parameters
-LR = 5e-4                   # learning rate
-UPDATE_NN_EVERY = 1         # how often to update the network
+LR = 5e-4                   # Adam learning rate
+UPDATE_NN_EVERY = 2         # how often to update the network
 
 # prioritized experience replay
 UPDATE_MEM_EVERY = 20          # how often to update the priorities
 UPDATE_MEM_PAR_EVERY = 3000    # how often to update the hyperparameters
-SAMPLE_SIZE = math.ceil(BATCH_SIZE * UPDATE_MEM_EVERY / UPDATE_NN_EVERY)
+SAMPLE_SIZE = math.ceil(BATCH_SIZE * UPDATE_MEM_EVERY / UPDATE_NN_EVERY)    # ??
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -31,7 +31,8 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class Agent():
     """Interacts with and learns from the environment."""
 
-    def __init__(self, state_size, action_size, action_constructor, seed=0, compute_weights=False):
+    def __init__(self, state_size, action_size, action_constructor,
+                 seed=0, compute_weights=False, priority_rate=None):
         """Initialize an Agent object.
         Params
         ======
@@ -57,7 +58,7 @@ class Agent():
 
         # Replay memory
         self.memory = ReplayBuffer(
-            action_size, BUFFER_SIZE, BATCH_SIZE, SAMPLE_SIZE, seed, compute_weights)
+            action_size, BUFFER_SIZE, BATCH_SIZE, SAMPLE_SIZE, seed, compute_weights, priority_rate)
 
         # Initialize time steps
         self.t_step_nn = 0
@@ -134,6 +135,7 @@ class Agent():
         loss = F.mse_loss(output, expected_values)
 
         # in case replays have weights
+        # зачем no grad? 
         if self.compute_weights:
             with torch.no_grad():
                 loss *= sum(np.multiply(weights, loss.data.cpu().numpy()))

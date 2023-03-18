@@ -43,11 +43,6 @@ class Wordle:
         guess: str,
         logging: bool = True
     ):
-        # if game is over
-        if self.isover():
-            raise StopIteration(
-                f"You have already {'won' if self.win else 'lost'}.")
-
         guess = self._prepoc(guess)
 
         # guess logging

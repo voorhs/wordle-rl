@@ -12,7 +12,9 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size, buffer_size, batch_size, sample_size, seed, compute_weights):
+    def __init__(
+            self, action_size, buffer_size, batch_size, sample_size,
+            seed, compute_weights, priority_rate=None):
         """Initialize a ReplayBuffer object.
 
         Params
@@ -22,6 +24,8 @@ class ReplayBuffer:
             sample_size (int): number of experiences to sample during a sampling iteration
             batch_size (int): size of each training batch
             seed (int): random seed
+            priority_rate (dict): priority updating rate params:
+                                    alpha, alpha_decay_rate, beta, beta_growth_rate
         """
         self.seed = random.seed(seed)
 
@@ -33,15 +37,20 @@ class ReplayBuffer:
         self.batch_size = batch_size
         self.sample_size = sample_size
 
-        # priority update configs
-        self.alpha = 0.5
-        self.alpha_decay_rate = 0.99
-        self.beta = 0.5
-        self.beta_growth_rate = 1.001
         self.compute_weights = compute_weights
+
+        # priority updating rate
+        self.priority_rate = priority_rate
         self.priorities_sum_alpha = 0
         self.priorities_max = 1
         self.weights_max = 1
+        if priority_rate is None:
+            self.priority_rate = {
+                'alpha': 0.5,
+                'alpha_decay_rate': 0.99,
+                'beta': 0.5,
+                'beta_growth_rate': 1.001
+            }
 
         # for convenience
         self.experience = namedtuple(
@@ -66,7 +75,12 @@ class ReplayBuffer:
         self.sampled_batches = []
         self.current_batch = 0
 
-    def update_priorities(self, tds, indices):  # разобраться с алгоритмом
+    def update_priorities(self, tds, indices):
+        """
+        Update priorities based on temporal differencies
+        between predicted Q value (local qnet) and
+        expected reward (target qnet)
+        """
         for td, index in zip(tds, indices):
             N = min(self.n_collected, self.buffer_size)
 
@@ -76,19 +90,21 @@ class ReplayBuffer:
 
             if self.compute_weights:
                 updated_weight = ((N * updated_priority) **
-                                  (-self.beta))/self.weights_max
+                                  (-self.priority_rate['beta']))/self.weights_max
                 if updated_weight > self.weights_max:
                     self.weights_max = updated_weight
             else:
                 updated_weight = 1
 
             old_priority = self.aux[index].priority
-            self.priorities_sum_alpha += updated_priority**self.alpha - old_priority**self.alpha
-            updated_probability = td[0]**self.alpha / self.priorities_sum_alpha
+            self.priorities_sum_alpha += updated_priority**self.priority_rate['alpha'] - \
+                old_priority**self.priority_rate['alpha']
+            updated_probability = td[0]**self.priority_rate['alpha'] / \
+                self.priorities_sum_alpha
             self.aux[index] = self.priority(
                 updated_priority, updated_probability, updated_weight, index)
 
-    def update_sample(self):    # update_memory_sampling
+    def update_sample(self):
         """Randomly sample X batches of experiences."""
         # X is the number of steps before updating memory
         self.current_batch = 0
@@ -101,11 +117,12 @@ class ReplayBuffer:
         self.sampled_batches = [random_values[i:i + self.batch_size]
                                 for i in range(0, len(random_values), self.batch_size)]
 
-    def update_parameters(self):    # разобраться с алгоритмом
-        self.alpha *= self.alpha_decay_rate
-        self.beta *= self.beta_growth_rate
-        if self.beta > 1:
-            self.beta = 1
+    def update_parameters(self):
+        """Move priprities distribution towards uniform one."""
+        self.priority_rate['alpha'] *= self.priority_rate['alpha_decay_rate']
+        self.priority_rate['beta'] *= self.priority_rate['beta_growth_rate']
+        if self.priority_rate['beta'] > 1:
+            self.priority_rate['beta'] = 1
 
         N = min(self.n_collected, self.buffer_size)
 
@@ -113,23 +130,21 @@ class ReplayBuffer:
         sum_prob_before = 0
         for element in self.aux.values():
             sum_prob_before += element.probability
-            self.priorities_sum_alpha += element.priority ** self.alpha
+            self.priorities_sum_alpha += element.priority ** self.priority_rate['alpha']
 
         sum_prob_after = 0
         for element in self.aux.values():
-            probability = element.priority ** self.alpha / self.priorities_sum_alpha
+            probability = element.priority ** self.priority_rate['alpha'] / \
+                self.priorities_sum_alpha
             sum_prob_after += probability
 
             weight = 1
             if self.compute_weights:
                 weight = ((N * element.probability) **
-                          (-self.beta)) / self.weights_max
+                          (-self.priority_rate['beta'])) / self.weights_max
 
             self.aux[element.index] = self.priority(
                 element.priority, probability, weight, element.index)
-
-        print("sum_prob before", sum_prob_before)
-        print("sum_prob after : ", sum_prob_after)
 
     def add(self, state, action, reward, next_state, done):
         """Add a new experience to memory."""
@@ -141,7 +156,7 @@ class ReplayBuffer:
         if self.n_collected > self.buffer_size:
             # in case buffer is overflowed
             tmp = self.aux[index]
-            self.priorities_sum_alpha -= tmp.priority ** self.alpha  # ??
+            self.priorities_sum_alpha -= tmp.priority ** self.priority_rate['alpha']
 
             if tmp.priority == self.priorities_max:
                 # to remove max priority we need to replace it
@@ -161,9 +176,10 @@ class ReplayBuffer:
         priority = self.priorities_max
         weight = self.weights_max
 
-        # ??
-        self.priorities_sum_alpha += priority ** self.alpha
-        probability = priority ** self.alpha / self.priorities_sum_alpha
+        # define probability
+        self.priorities_sum_alpha += priority ** self.priority_rate['alpha']
+        probability = priority ** self.priority_rate['alpha'] / \
+            self.priorities_sum_alpha
 
         # finish insertion
         self.buffer[index] = self.experience(
@@ -197,7 +213,6 @@ class ReplayBuffer:
         dones = torch.from_numpy(
             np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(device)
 
-        # зачем веса?
         return (states, actions, rewards, next_states, dones, weights, indices)
 
     def __len__(self):

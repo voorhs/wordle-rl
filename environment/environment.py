@@ -6,6 +6,7 @@ from wordle.wordlenp import Wordle
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+
 class BaseState:
     def step(self, guess, pattern):
         """Update state based on agent guess and wordle pattern."""
@@ -40,8 +41,6 @@ class BaseAction:
         """Make new action instance of the same class."""
         raise NotImplementedError()
 
-# needs refactoring with torch and device
-
 
 class StateYesNo(BaseState):
     # inspired by https://github.com/andrewkho/wordle-solver/blob/master/deep_rl/wordle/state.py
@@ -54,7 +53,7 @@ class StateYesNo(BaseState):
         # 26 indicators that letter is in answer
         self.isin = np.zeros(26)
 
-        # number of current step
+        # steps left
         self.init_steps = steps
         self.steps = steps
 
@@ -77,7 +76,7 @@ class StateYesNo(BaseState):
         return ans
 
     def step(self, guess, pattern):
-        self.steps += 1
+        self.steps -= 1
 
         yes_letters = []
 
@@ -153,6 +152,29 @@ class StateYesNo(BaseState):
         return copy
 
 
+class StateVocabulary(StateYesNo):
+    def __init__(self, answers_mask=None, answer: str = 'hello', steps=6):
+        """`answers_mask` is a mask of possible answers"""
+        super(StateVocabulary, self).__init__(answer=answer, steps=steps)
+        self.answers_mask = answers_mask
+
+    @property
+    def size(self):
+        return super().size + self.answers_mask.size
+
+    def tovector(self):
+        return torch.cat([super().tovector(), torch.Tensor(self.answers_mask).to(DEVICE)])
+
+    def copy(self):
+        copy = StateVocabulary(
+            answers_mask=self.answers_mask, answer=self.answer, steps=self.init_steps)
+        copy.isknown = self.isknown.copy()
+        copy.isin = self.isin.copy()
+        copy.steps = self.init_steps
+        copy.coloring = self.coloring.copy()
+        return copy
+
+
 VOCABULARY = Wordle._load_vocabulary('wordle/guesses.txt', astype=list)
 
 
@@ -180,6 +202,8 @@ class ActionVocabulary(BaseAction):
         return ActionVocabulary(nn_output, self.vocabulary)
 
 
+# разделить методы на основные и вспомогательные
+# чтобы стороннему человеку было легче вникнуть в алгоритм
 class Environment:
     def __init__(
         self, rewards: defaultdict, wordle: Wordle = None, state_instance: BaseState = None
@@ -215,17 +239,7 @@ class Environment:
 
         if output is not None:
             # print coloring to output file
-            with open(output, mode='a') as f:
-                for i, p in enumerate(pattern):
-                    if p == 'B':
-                        f.write('{:^7}'.format(guess[i].upper()))
-                    elif p == 'Y':
-                        f.write('{:^7}'.format('*'+guess[i].upper()+'*'))
-                    elif p == 'G':
-                        f.write('{:^7}'.format('**'+guess[i].upper()+'**'))
-                f.write('\n')   # end of word line
-                if self.isover():
-                    f.write('\n')   # end of wordle board
+            self._print_coloring(output, guess, pattern, reward)
 
         return self.state.copy(), reward, self.isover()
 
@@ -250,6 +264,19 @@ class Environment:
         self.collected = {color: set() for color in ['B', 'Y', 'G']}
         return self.state.copy()
 
-    # if current state is terminal
+    # indicator of terminal state (end of episode)
     def isover(self):
         return self.wordle.isover()
+
+    def _print_coloring(self, output, guess, pattern, reward):
+        with open(output, mode='a') as f:
+            for i, p in enumerate(pattern):
+                if p == 'B':
+                    f.write('{:^7}'.format(guess[i].upper()))
+                elif p == 'Y':
+                    f.write('{:^7}'.format('*'+guess[i].upper()+'*'))
+                elif p == 'G':
+                    f.write('{:^7}'.format('**'+guess[i].upper()+'**'))
+            f.write(f'\treward: {reward}\n')    # end of word line
+            if self.isover():
+                f.write('\n')   # end of wordle board
