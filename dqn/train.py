@@ -32,10 +32,10 @@ def train(
         logging_level = n_episodes // 10
 
     # rewards
-    scores = deque(maxlen=100)
+    scores = deque(maxlen=logging_level)
 
     # indicators of success
-    successes = deque(maxlen=100)
+    successes = deque(maxlen=logging_level)
 
     # exploration chance
     eps = eps_start
@@ -78,7 +78,8 @@ def train(
                 f'\nEpisode {i_episode:4d}',
                 f'Score: {score:.2f}',
                 f'Success Rate: {100*success:.1f}%',
-                f'Duration: {elapsed_time:.1f} s',
+                f'RMSE: {torch.sqrt(agent.loss).item():.3f}',
+                f'Time: {elapsed_time:.1f} s',
                 sep='\t'
             )
 
@@ -147,7 +148,7 @@ def test(env: Environment, agent: Agent, return_result=False):
     ])
 
     # print in console and in txt file
-    print(message)
+    print('\n' + message)
     with open(output, 'a') as f:
         f.write(message)
         f.write(f'\nscores: {scores}\nsucesses: {success}')

@@ -135,10 +135,13 @@ class Agent():
         loss = F.mse_loss(output, expected_values)
 
         # in case replays have weights
-        # зачем no grad? 
         if self.compute_weights:
+            # we need no_grad because `weights` are not optimized
             with torch.no_grad():
                 loss *= sum(np.multiply(weights, loss.data.cpu().numpy()))
+
+        # to print during training
+        self.loss = loss.cpu()
 
         # train local network
         self.optimizer.zero_grad()

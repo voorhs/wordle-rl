@@ -41,16 +41,20 @@ class ReplayBuffer:
 
         # priority updating rate
         self.priority_rate = priority_rate
-        self.priorities_sum_alpha = 0
+        if priority_rate is None:
+            self.priority_rate={
+                'alpha': 0.9,
+                'alpha_decay_rate': 0.95,
+                'beta': 1,
+                'beta_growth_rate': 1
+            }
+        self.alpha = self.priority_rate['alpha'] + 1e-3
+        self.alpha_decay_rate = self.priority_rate['alpha_decay_rate']
+        self.beta = self.priority_rate['beta']
+        self.beta_growth_rate = self.priority_rate['beta_growth_rate']
+
         self.priorities_max = 1
         self.weights_max = 1
-        if priority_rate is None:
-            self.priority_rate = {
-                'alpha': 0.5,
-                'alpha_decay_rate': 0.99,
-                'beta': 0.5,
-                'beta_growth_rate': 1.001
-            }
 
         # for convenience
         self.experience = namedtuple(
@@ -63,8 +67,8 @@ class ReplayBuffer:
         # number of collected replays
         self.n_collected = 0
 
-        # array of replays
-        self.buffer = {i: self.experience for i in range(buffer_size)}
+        # array of replays; почему здесь не конструкторы?
+        self.buffer = {} #{i: self.experience for i in range(buffer_size)}
 
         # array of auxiliary data
         self.aux = {i: self.priority(
@@ -90,17 +94,13 @@ class ReplayBuffer:
 
             if self.compute_weights:
                 updated_weight = ((N * updated_priority) **
-                                  (-self.priority_rate['beta']))/self.weights_max
+                                  (-self.beta)) / self.weights_max
                 if updated_weight > self.weights_max:
                     self.weights_max = updated_weight
             else:
                 updated_weight = 1
 
-            old_priority = self.aux[index].priority
-            self.priorities_sum_alpha += updated_priority**self.priority_rate['alpha'] - \
-                old_priority**self.priority_rate['alpha']
-            updated_probability = td[0]**self.priority_rate['alpha'] / \
-                self.priorities_sum_alpha
+            updated_probability = td[0] ** self.alpha
             self.aux[index] = self.priority(
                 updated_priority, updated_probability, updated_weight, index)
 
@@ -118,30 +118,23 @@ class ReplayBuffer:
                                 for i in range(0, len(random_values), self.batch_size)]
 
     def update_parameters(self):
-        """Move priprities distribution towards uniform one."""
-        self.priority_rate['alpha'] *= self.priority_rate['alpha_decay_rate']
-        self.priority_rate['beta'] *= self.priority_rate['beta_growth_rate']
-        if self.priority_rate['beta'] > 1:
-            self.priority_rate['beta'] = 1
+        """Move priorities distribution towards uniform one."""
+        self.alpha *= self.alpha_decay_rate
+        self.beta *= self.beta_growth_rate
+        if self.beta > 1:
+            self.beta = 1
 
         N = min(self.n_collected, self.buffer_size)
 
-        self.priorities_sum_alpha = 0
-        sum_prob_before = 0
-        for element in self.aux.values():
-            sum_prob_before += element.probability
-            self.priorities_sum_alpha += element.priority ** self.priority_rate['alpha']
-
         sum_prob_after = 0
         for element in self.aux.values():
-            probability = element.priority ** self.priority_rate['alpha'] / \
-                self.priorities_sum_alpha
+            probability = element.priority ** self.alpha
             sum_prob_after += probability
 
             weight = 1
             if self.compute_weights:
                 weight = ((N * element.probability) **
-                          (-self.priority_rate['beta'])) / self.weights_max
+                          (-self.beta)) / self.weights_max
 
             self.aux[element.index] = self.priority(
                 element.priority, probability, weight, element.index)
@@ -156,7 +149,6 @@ class ReplayBuffer:
         if self.n_collected > self.buffer_size:
             # in case buffer is overflowed
             tmp = self.aux[index]
-            self.priorities_sum_alpha -= tmp.priority ** self.priority_rate['alpha']
 
             if tmp.priority == self.priorities_max:
                 # to remove max priority we need to replace it
@@ -177,9 +169,7 @@ class ReplayBuffer:
         weight = self.weights_max
 
         # define probability
-        self.priorities_sum_alpha += priority ** self.priority_rate['alpha']
-        probability = priority ** self.priority_rate['alpha'] / \
-            self.priorities_sum_alpha
+        probability = priority ** self.alpha
 
         # finish insertion
         self.buffer[index] = self.experience(
@@ -202,6 +192,7 @@ class ReplayBuffer:
             indices.append(replay.index)
 
         # expand, convert to torch, send to cuda
+        # почему здесь проверки на None?
         states = torch.from_numpy(
             np.vstack([e.state.tovector() for e in experiences if e is not None])).float().to(device)
         actions = torch.from_numpy(

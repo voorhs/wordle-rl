@@ -8,7 +8,7 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 class BaseState:
-    def step(self, guess, pattern):
+    def step(self, action, pattern):
         """Update state based on agent guess and wordle pattern."""
         raise NotImplementedError()
 
@@ -75,9 +75,9 @@ class StateYesNo(BaseState):
         ans = torch.from_numpy(ans).float().to(DEVICE)
         return ans
 
-    def step(self, guess, pattern):
+    def step(self, action:BaseAction, pattern, done=None):
         self.steps -= 1
-
+        guess = action.get_word()
         yes_letters = []
 
         # mark all green letters as 'yes'
@@ -162,6 +162,10 @@ class StateVocabulary(StateYesNo):
     def size(self):
         return super().size + self.answers_mask.size
 
+    def step(self, action: BaseAction, pattern, done):
+        super().step(action, pattern)
+        self.answers_mask[action.value] = int(done)
+
     def tovector(self):
         return torch.cat([super().tovector(), torch.Tensor(self.answers_mask).to(DEVICE)])
 
@@ -235,7 +239,7 @@ class Environment:
         reward = self._reward(guess, pattern)
 
         # get to next state of environment
-        self.state.step(guess, pattern)
+        self.state.step(action, pattern, self.isover())
 
         if output is not None:
             # print coloring to output file
@@ -264,8 +268,8 @@ class Environment:
         self.collected = {color: set() for color in ['B', 'Y', 'G']}
         return self.state.copy()
 
-    # indicator of terminal state (end of episode)
     def isover(self):
+        # indicator of terminal state (end of episode)
         return self.wordle.isover()
 
     def _print_coloring(self, output, guess, pattern, reward):
