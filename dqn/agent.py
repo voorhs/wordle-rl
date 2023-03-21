@@ -21,11 +21,11 @@ LR = 5e-4                   # Adam learning rate
 UPDATE_NN_EVERY = 2         # how often to update the network
 
 # prioritized experience replay
-UPDATE_MEM_EVERY = 20          # how often to update the priorities
+UPDATE_MEM_EVERY = 20          # how often to update the sample
 UPDATE_MEM_PAR_EVERY = 3000    # how often to update the hyperparameters
 SAMPLE_SIZE = math.ceil(BATCH_SIZE * UPDATE_MEM_EVERY / UPDATE_NN_EVERY)    # ??
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 class Agent():
@@ -49,30 +49,31 @@ class Agent():
 
         # Q-Network
         self.qnetwork_local = QNetwork(
-            state_size, action_size, seed).float().to(device)
+            state_size, action_size, seed).float().to(DEVICE)
         self.qnetwork_target = QNetwork(
-            state_size, action_size, seed).float().to(device)
+            state_size, action_size, seed).float().to(DEVICE)
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=LR)
         self.criterion = nn.MSELoss()
-        self.compute_weights = compute_weights
+        self.loss = None
 
         # Replay memory
         self.memory = ReplayBuffer(
             action_size, BUFFER_SIZE, BATCH_SIZE, SAMPLE_SIZE, seed, compute_weights, priority_rate)
+        self.compute_weights = compute_weights
 
         # Initialize time steps
         self.t_step_nn = 0
         self.t_step_mem_par = 0
         self.t_step_mem = 0
 
-    def step(self, state:BaseState, action:BaseAction, reward, next_state:BaseAction, done):
+    def step(self, state:BaseState, action:BaseAction, reward, next_state:BaseState, done):
         """
         Runs internal processes:
         - update replay buffer state
         - run one epoch train
         """
         # save experience in replay memory
-        self.memory.add(state.copy(), action, reward, next_state, done)
+        self.memory.add(state.value, action.value, reward, next_state.value, done)
 
         # check for updates
         self.t_step_nn = (self.t_step_nn + 1) % UPDATE_NN_EVERY
@@ -96,7 +97,6 @@ class Agent():
 
         Params
         ======
-            state (array_like): current state
             eps (float): epsilon, for epsilon-greedy action selection
         """
         nn_output = None
@@ -104,14 +104,16 @@ class Agent():
             # greedy action based on Q function
             self.qnetwork_local.eval()
             with torch.no_grad():
-                nn_output = self.qnetwork_local(state.tovector())
+                input = torch.from_numpy(state.value).float().to(DEVICE)
+                nn_output = self.qnetwork_local(input)
             self.qnetwork_local.train()
         else:
             # exploration action
-            nn_output = torch.randn(self.action_size)   # change to torch
+            nn_output = torch.randn(self.action_size)
             
         return self.action_constructor(nn_output.cpu().data.numpy())
 
+    # разобраться подробнее
     def learn(self, sampling, gamma):
         """Update value parameters using given batch of experience tuples.
 
@@ -122,11 +124,11 @@ class Agent():
         """
         states, actions, rewards, next_states, dones, weights, indices = sampling
 
-        # Q-function
+        # Q-function over all actions
         q_target = self.qnetwork_target(next_states)\
                         .detach().max(1)[0].unsqueeze(1)
 
-        # discounted return
+        # expected return
         expected_values = rewards + gamma * q_target * (1 - dones)
 
         # predicted return
@@ -136,12 +138,12 @@ class Agent():
 
         # in case replays have weights
         if self.compute_weights:
-            # we need no_grad because `weights` are not optimized
+            # why no grad??
             with torch.no_grad():
                 loss *= sum(np.multiply(weights, loss.data.cpu().numpy()))
 
         # to print during training
-        self.loss = loss.cpu()
+        self.loss = torch.sqrt(loss).cpu().item()
 
         # train local network
         self.optimizer.zero_grad()
@@ -151,9 +153,9 @@ class Agent():
         # update target network
         self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
 
-        # update priorities basing on loss ??
-        delta = abs(expected_values - output.detach()).numpy()
-        self.memory.update_priorities(delta, indices)
+        # update priorities basing on loss
+        tds = (expected_values - output.detach()).abs().cpu().numpy()
+        self.memory.update_priorities(tds, indices)
 
     def soft_update(self, local_model, target_model, tau):
         """Soft update model parameters.
