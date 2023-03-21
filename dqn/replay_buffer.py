@@ -4,7 +4,6 @@ import random
 from collections import namedtuple
 import numpy as np
 import torch
-import operator
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -15,10 +14,11 @@ class ReplayBuffer:
     def __init__(
             self, action_size, buffer_size, batch_size, sample_size,
             seed, compute_weights, priority_rate=None):
-        """Initialize a ReplayBuffer object.
+        """
+        Initialize a ReplayBuffer object.
 
         Params
-        ======
+        ------
             action_size (int): dimension of each action
             buffer_size (int): maximum size of buffer
             sample_size (int): number of experiences to sample during a sampling iteration
@@ -26,6 +26,14 @@ class ReplayBuffer:
             seed (int): random seed
             priority_rate (dict): priority updating rate params:
                                     alpha, alpha_decay_rate, beta, beta_growth_rate
+
+        Buffer
+        ------
+        Stores experience as named tuples in self.buffer:
+            `state`, `next_state` (np.ndarray): vector representing state of environment
+            `action` (int): index of word which agent chose (BaseAction.value in general)
+            `done` (bool): indicator of end of episode after agent choosing `action`
+            `reward` (float): reward from environment
         """
         self.seed = random.seed(seed)
 
@@ -42,7 +50,7 @@ class ReplayBuffer:
         # priority updating rate
         self.priority_rate = priority_rate
         if priority_rate is None:
-            self.priority_rate={
+            self.priority_rate = {
                 'alpha': 0.9,
                 'alpha_decay_rate': 0.95,
                 'beta': 1,
@@ -56,7 +64,7 @@ class ReplayBuffer:
         self.priorities_max = 1
         self.weights_max = 1
 
-        # for convenience
+        # to conveniently create new experience records
         self.experience = namedtuple(
             "Experience", field_names=["state", "action", "reward", "next_state", "done"])
         self.priority = namedtuple(
@@ -67,8 +75,8 @@ class ReplayBuffer:
         # number of collected replays
         self.n_collected = 0
 
-        # array of replays; почему здесь не конструкторы?
-        self.buffer = {} #{i: self.experience for i in range(buffer_size)}
+        # array of replays
+        self.buffer = {}
 
         # array of auxiliary data
         self.aux = {i: self.priority(
@@ -148,21 +156,20 @@ class ReplayBuffer:
 
         if self.n_collected > self.buffer_size:
             # in case buffer is overflowed
-            tmp = self.aux[index]
 
-            if tmp.priority == self.priorities_max:
+            if self.aux[index].priority == self.priorities_max:
                 # to remove max priority we need to replace it
                 # with second max priority
-                self.aux[index].priority = 0
+                self.aux[index] = self.priority(0, 0, 0, index)
                 self.priorities_max = max(
-                    self.aux.items(), key=operator.itemgetter(1)).priority   # lambda function maybe?
+                    self.aux.values(), key=lambda x: x.priority).priority
 
             if self.compute_weights:
-                if tmp.weight == self.weights_max:
+                if self.aux[index].weight == self.weights_max:
                     # the same as for max priority
-                    self.aux[index].weight = 0
+                    self.aux[index] = self.priority(0, 0, 0, index)
                     self.weights_max = max(
-                        self.aux.items(), key=operator.itemgetter(2)).weight
+                        self.aux.values(), key=lambda x: x.weight).weight
 
         # recent experience has max priority and weight
         priority = self.priorities_max
@@ -194,13 +201,13 @@ class ReplayBuffer:
         # expand, convert to torch, send to cuda
         # почему здесь проверки на None?
         states = torch.from_numpy(
-            np.vstack([e.state.tovector() for e in experiences if e is not None])).float().to(device)
+            np.vstack([e.state for e in experiences if e is not None])).float().to(device)
         actions = torch.from_numpy(
-            np.vstack([e.action.value for e in experiences if e is not None])).long().to(device)
+            np.vstack([e.action for e in experiences if e is not None])).long().to(device)
         rewards = torch.from_numpy(
             np.vstack([e.reward for e in experiences if e is not None])).float().to(device)
         next_states = torch.from_numpy(
-            np.vstack([e.next_state.tovector() for e in experiences if e is not None])).float().to(device)
+            np.vstack([e.next_state for e in experiences if e is not None])).float().to(device)
         dones = torch.from_numpy(
             np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(device)
 

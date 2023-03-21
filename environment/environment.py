@@ -16,7 +16,8 @@ class BaseState:
         """Begin new episode."""
         raise NotImplementedError()
 
-    def tovector(self):
+    @property
+    def value(self):
         """Return vector view to put it into Q network."""
         raise NotImplementedError()
 
@@ -69,11 +70,10 @@ class StateYesNo(BaseState):
             ans += arr.size
         return ans
 
-    def tovector(self):
+    @property
+    def value(self):
         # this vector is supposed to be input of DQN network
-        ans = np.r_[self.isknown, self.isin, self.coloring.ravel(), self.steps]
-        ans = torch.from_numpy(ans).float().to(DEVICE)
-        return ans
+        return np.r_[self.isknown, self.isin, self.coloring.ravel(), self.steps]
 
     def step(self, action:BaseAction, pattern, done=None):
         self.steps -= 1
@@ -155,8 +155,9 @@ class StateYesNo(BaseState):
 class StateVocabulary(StateYesNo):
     def __init__(self, answers_mask=None, answer: str = 'hello', steps=6):
         """`answers_mask` is a mask of possible answers"""
-        super(StateVocabulary, self).__init__(answer=answer, steps=steps)
-        self.answers_mask = answers_mask
+        super().__init__(answer=answer, steps=steps)
+        self.init_answers_mask = answers_mask.copy()
+        self.answers_mask = answers_mask.copy()
 
     @property
     def size(self):
@@ -166,8 +167,13 @@ class StateVocabulary(StateYesNo):
         super().step(action, pattern)
         self.answers_mask[action.value] = int(done)
 
-    def tovector(self):
-        return torch.cat([super().tovector(), torch.Tensor(self.answers_mask).to(DEVICE)])
+    @property
+    def value(self):
+        return np.r_[super().value, self.answers_mask]
+
+    def reset(self, answer):
+        super().reset(answer=answer)
+        self.answers_mask = self.init_answers_mask.copy()
 
     def copy(self):
         copy = StateVocabulary(
