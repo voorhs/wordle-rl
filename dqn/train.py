@@ -14,7 +14,7 @@ from dqn.agent import Agent
 def train(
         env: Environment, agent: Agent, logging_level=None,
         n_episodes=2000, eps_start=1.0, eps_end=0.001, eps_decay=0.995,
-        end_of_episode=None):
+        end_of_episode=None, nickname=None):
     """
     Params
     ------
@@ -23,9 +23,15 @@ def train(
         eps_end (float):    minimum value of epsilon
         eps_decay (float):  multiplicative factor (per episode) for decreasing epsilon
     """
+    # to leave space for customizing end of episode
     if end_of_episode is None:
        end_of_episode = lambda env: env.isover()
-
+    
+    # for saving net checkpoints as "<nickname>-<i>-<timestamp>.pth"
+    if nickname is None:
+        nickname = 'checkpoint'
+    timestamp = datetime.fromtimestamp(time()).strftime("%d-%m-%Y-%H:%M:%S")
+    
     # logging_level defines size of sliding window of last episodes
     # to calculate statistics from and display stats during training
     if logging_level is None:
@@ -37,11 +43,37 @@ def train(
     # indicators of success
     successes = deque(maxlen=logging_level)
 
+    # for "time" vs "win rate" testing
+    timers = []
+    win_rates = []
+
     # exploration chance
     eps = eps_start
 
     start_time = time()
+    
+    # collect enough experience before training
+    print(f'Playing {agent.n_warm} initial games (warm start)...', end=' ')
+    for i_episode in range(agent.n_warm):
+        # begin new episode
+        state = env.reset()
+        score = 0
 
+        # until end of episode
+        while not end_of_episode(env):
+            # agent-environment interaction
+            action = agent.act(state, eps)
+            next_state, reward, done = env.step(action)
+
+            # collect replay and learn from buffer
+            agent.step(state, action, reward, next_state, done)
+
+            # collect reward and
+            score += reward
+            state = next_state
+    print(f'Collected! Time: {time() - start_time:.1f} s')
+
+    # begin training
     for i_episode in range(1, n_episodes+1):
         # begin new episode
         state = env.reset()
@@ -68,29 +100,37 @@ def train(
         successes.append(env.wordle.win)
         success = np.mean(successes)
 
+        elapsed_time = time() - start_time
+        timers.append(elapsed_time)
+        win_rates.append(success)
+
         # decrease exploration chance
         eps = max(eps_end, eps_decay * eps)
 
         if i_episode % logging_level == 0:
             # progress print
-            elapsed_time = time() - start_time
             print(
                 f'\nEpisode {i_episode:4d}',
                 f'Score: {score:.2f}',
                 f'Success Rate: {100*success:.1f}%',
-                f'RMSE: {torch.sqrt(agent.loss).item():.3f}',
+                f'RMSE: {agent.loss:.3f}' if agent.loss else f'RMSE: None',
                 f'Time: {elapsed_time:.1f} s',
                 sep='\t'
             )
 
         # save net params
         if i_episode % 5000 == 0:
-            torch.save(agent.qnetwork_local.state_dict(),
-                       f'checkpoint{i_episode//5000}.pth')
+            print('\nSaving checkpoint...', end=' ')
+            num = i_episode // 5000
+            filename = f'{nickname}-{num}-{timestamp}.pth'
+            torch.save(agent.qnetwork_local.state_dict(), filename)
+            print(f'Saved to {filename}')
 
     # save final net params
     timestamp = datetime.fromtimestamp(time()).strftime("%d-%m-%Y-%H:%M:%S")
-    torch.save(agent.qnetwork_local.state_dict(), 'net' + timestamp + '.pth')
+    torch.save(agent.qnetwork_local.state_dict(), nickname + '-final-' + timestamp + '.pth')
+
+    return timers, win_rates
 
 
 def test(env: Environment, agent: Agent, return_result=False):
