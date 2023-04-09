@@ -4,6 +4,7 @@ import cpprb
 import numpy as np
 import random
 from functools import partial
+from typing import List
 
 from dqn.model import QNetwork
 from environment.environment import BaseAction, BaseState
@@ -23,14 +24,6 @@ class Agent():
         optimizer=partial(Adam, lr=5e-4),
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ):
-        """Initialize an Agent object.
-        Params
-        ======
-            state_size (int): dimension of each state
-            action_size (int): dimension of each action
-            action_constructor: function taking `nn_output` and returning action instance
-            seed (int): random seed
-        """
         self.seed = random.seed(seed)
 
         self.state_size = state_size
@@ -67,7 +60,7 @@ class Agent():
             raise ValueError(
                 f'Soft update coefficient `tau` must be float in [0,1], but given: {tau}')
 
-    def add(self, state: BaseState, action: BaseAction, reward, next_state: BaseState, done):
+    def add(self, state: np.ndarray, action: BaseAction, reward, next_state: BaseState, done):
         """
         Runs internal processes:
         - update replay buffer state
@@ -75,7 +68,7 @@ class Agent():
         """
         # save experience in replay memory
         self.memory.add(
-            state=state.value,
+            state=state,
             action=action.value,
             reward=reward,
             next_state=next_state.value,
@@ -86,16 +79,11 @@ class Agent():
         # check for updates
         self.t += 1
 
-        if self.t % 2 == 0:
+        if self.t % 8 == 0 and not self.eval:
             self.learn()
-        
-    def act(self, state: BaseState):
-        """Returns actions for given state as per current policy.
 
-        Params
-        ======
-            eps (float): epsilon, for epsilon-greedy action selection
-        """
+    def act_single(self, state: BaseState):
+        """Returns action for given state"""
         nn_output = None
         if random.random() > self.eps:
             # greedy action based on Q function
@@ -109,6 +97,43 @@ class Agent():
             nn_output = torch.randn(self.action_size)
 
         return self.action_constructor(nn_output.cpu().data.numpy())
+    
+    def act(self, states: List[np.ndarray]):
+        """Returns actions for given batch of states"""
+        play_batch_size = len(states)
+        states = np.array(states)
+        
+        # for each game define what action to choose: greedy or exporative
+        explore_ind = []
+        greedy_ind = []
+        events = np.random.uniform(low=0, high=1, size=play_batch_size)
+        for i in range(play_batch_size):
+            if events[i] < self.eps:
+                explore_ind.append(i)
+            else:
+                greedy_ind.append(i)
+
+        # to store result
+        nn_output = torch.empty((play_batch_size, self.action_size)).to(self.device)
+        
+        # greedy action based on Q function
+        self.qnetwork_local.eval()
+        with torch.no_grad():
+            nn_output[greedy_ind] = self.qnetwork_local(
+                torch.from_numpy(states[greedy_ind])
+                    .float()
+                    .unsqueeze(0)
+                    .to(self.device)
+            )
+        
+        # explorative action
+        nn_output[explore_ind] = torch.randn(len(explore_ind), self.action_size).to(self.device)
+
+        # convert to `BaseAction` inheritant
+        res = []
+        for out in nn_output.data.cpu().numpy():
+            res.append(self.action_constructor(out))
+        return res
 
     def learn(self):
         """Update net params using batch sampled from replay buffer"""

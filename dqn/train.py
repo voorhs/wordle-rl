@@ -6,6 +6,7 @@ import numpy as np
 from collections import deque
 from time import time
 from datetime import datetime
+from typing import List
 
 from environment.environment import Environment
 from dqn.cpprb_agent import Agent
@@ -13,7 +14,7 @@ from dqn.cpprb_agent import Agent
 class Trainer:
     def __init__(
             self,
-            env: Environment, agent: Agent,
+            env_list: List[Environment], agent: Agent,
             logging_interval=None, checkpoint_interval=None,
             play_batch_size=None,
             n_batches=32, n_batches_warm=8,
@@ -27,7 +28,7 @@ class Trainer:
             play_batch_size (int): to strike a balance between the amount of incoming replays and size of the training batch
             checkpoint_level (int): defines the interval of saving net params
         """
-        self.env = env
+        self.env_list = env_list
         self.agent = agent
 
         self.n_batches = n_batches
@@ -48,11 +49,12 @@ class Trainer:
     def train(self, eps_start=1.0, eps_end=0.05, eps_decay=0.999, nickname=None):
         """Requires params to define exploration during training"""
         
-        # for saving net checkpoints as "<nickname>-<i>-<timestamp>.pth"
+        # for saving net checkpoints as "<nickname>-<num>.pth"
         if nickname is None:
-            nickname = 'checkpoint'
+            nickname = 'checkpoint' + datetime.fromtimestamp(time()).strftime("%d-%m-%Y-%H:%M:%S")
         self.nickname = nickname
-        self.timestamp = datetime.fromtimestamp(time()).strftime("%d-%m-%Y-%H:%M:%S")
+        
+        # for saving text reports of gameplays (self.test(log_game=True))
         self.t = 0
 
         # rewards and indicators of win; used for sliding window progress print
@@ -65,6 +67,7 @@ class Trainer:
 
         # don't update net and 100% explore
         self.agent.eps = 1
+        self.agent.eval = True
         for _ in range(self.n_batches_warm):
             self.play_batch()
 
@@ -81,10 +84,8 @@ class Trainer:
 
         for i_batch in range(1, self.n_batches+1):
             # collect batch of replays
+            self.agent.eval = False
             batch_scores, batch_wins = self.play_batch()
-
-            # learn from buffer (update q nets)
-            # self.agent.learn()
 
             # decrease exploration chance
             self.agent.eps = max(eps_end, eps_decay * self.agent.eps)
@@ -92,13 +93,14 @@ class Trainer:
             # collect statistics (update those "guys")
             elapsed_time = time() - self.start_time
             self.log_train(batch_scores, batch_wins, elapsed_time)
+            self.agent.eval = True
             self.log_test(i_batch, elapsed_time)
 
             if i_batch % self.checkpoint_interval == 0:
                 # save net params
                 print('\nSaving checkpoint...', end=' ')
                 num = i_batch // self.checkpoint_interval
-                filename = f'{self.nickname}-{num}-{self.timestamp}.pth'
+                filename = f'{self.nickname}-{num}.pth'
                 torch.save(self.agent.qnetwork_local.state_dict(), filename)
                 print(f'Saved to {filename}')
         
@@ -106,6 +108,52 @@ class Trainer:
         return self.train_timers, self.train_win_rates, self.test_timers, self.test_win_rates
 
     def play_batch(self):
+        envs_number = len(self.env_list)
+        
+        state_size = self.env_list[0].state.size
+        states = np.empty((envs_number, state_size))
+
+        # reset all environments
+        for env in self.env_list:
+            env.reset()
+
+        # to store stats
+        batch_scores = np.zeros(envs_number)
+        batch_wins = np.zeros(envs_number, dtype=bool)
+        
+        all_is_over = False
+        while not all_is_over:
+            # collect batch of states from envs that are not finished yet
+            indexes = []
+            for i, env in enumerate(self.env_list):
+                if env.isover():
+                    continue
+
+                states[i] = env.state.value
+                indexes.append(i)
+            
+            # feed batch to agent
+            actions = self.agent.act(states[indexes])
+
+            all_is_over = True
+            for i, action in zip(indexes, actions):
+                # send action to env
+                next_state, reward, done = self.env_list[i].step(action)
+
+                # save replay to agent's buffer
+                self.agent.add(states[i], action, reward, next_state, done)
+            
+                # collect stats
+                batch_scores[i] += reward
+
+                if done:
+                    batch_wins[i] = self.env_list[i].wordle.win
+                else:
+                    all_is_over = False
+        
+        return batch_scores, batch_wins
+
+    def play_batch_old(self):
         """
         Play episodes to get at least `self.play_batch_size` of replays.
         
@@ -197,48 +245,50 @@ class Trainer:
         print(
             f'\nBatch {i_batch:4d}',
             f'Time: {elapsed_time:.0f} s',
-            f'RMSE: {self.agent.loss:.4f}' if self.agent.loss else f'RMSE: None',
+            # f'RMSE: {self.agent.loss:.4f}' if self.agent.loss else f'RMSE: None',
             f'Agent Eps: {self.agent.eps:.2f}',
-            f'Train Score: {np.mean(self.scores):.2f}',
+            # f'Train Score: {np.mean(self.scores):.2f}',
             f'Train Win Rate: {self.train_win_rates[-1]:.2f}%',
-            f'Test Score: {test_scores:.2f}',
+            # f'Test Score: {test_scores:.2f}',
             f'Test Win Rate: {test_win_rate:.2f}%',
             f'Test Mean Steps: {mean_steps:.2f}',
             sep='\t'
         )
 
     def test(self, log_game=True, return_result=False):
+        env = self.env_list[0]
+
         output = None
         if log_game:
-            # output file to show how agent played
+            # output file to show how agent played (text report of gameplay)
             output = f'{self.nickname}-{self.t}.txt'
 
         # number of test words
-        n_episodes = len(self.env.wordle.answers)
+        n_episodes = len(env.wordle.answers)
 
         # rewards and indicators of success
         scores, success, steps = np.zeros((3, n_episodes))
         success_count = 0
 
         # hard reset pre-generated answers list
-        self.env.wordle.current_answer = -1
+        env.wordle.current_answer = -1
 
         # run through all answers
         for i_episode in range(n_episodes):
 
             # begin new episode
-            state = self.env.reset(replace=False)
+            state = env.reset(replace=False)
             
             if log_game:
                 with open(output, 'a') as f:
                     f.write(f'Episode {i_episode+1}\tAnswer {state.answer}\n')
 
             # until end of episode
-            while not self.env.isover():
+            while not env.isover():
 
-                # agent-environment interaction (prints guess with pattern)
-                action = self.agent.act(state)
-                next_state, reward, _ = self.env.step(action, output)
+                # agent-environment interaction (`output` stands for printing report to txt file)
+                action = self.agent.act_single(state)
+                next_state, reward, _ = env.step(action, output)
 
                 # collect statistics
                 scores[i_episode] += reward
@@ -249,11 +299,11 @@ class Trainer:
             if log_game:
                 # end of episode
                 with open(output, 'a') as f:
-                    f.write(f"Score {scores[i_episode]}\t{'WIN' if self.env.wordle.win else 'LOSE'}\n\n")
+                    f.write(f"Score {scores[i_episode]}\t{'WIN' if env.wordle.win else 'LOSE'}\n\n")
 
             # collect statistics
-            success[i_episode] = self.env.wordle.win
-            success_count += self.env.wordle.win
+            success[i_episode] = env.wordle.win
+            success_count += env.wordle.win
 
         # final statistics
         scores = np.mean(scores)
