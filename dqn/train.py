@@ -9,12 +9,12 @@ from datetime import datetime
 from typing import List
 
 from environment.environment import Environment
-from dqn.cpprb_agent import Agent
+from dqn.agent import Agent
 
 class Trainer:
     def __init__(
             self,
-            env_list: List[Environment], agent: Agent,
+            env: List[Environment] | Environment, agent: Agent,
             logging_interval=None, checkpoint_interval=None,
             play_batch_size=None,
             n_batches=32, n_batches_warm=8,
@@ -28,7 +28,10 @@ class Trainer:
             play_batch_size (int): to strike a balance between the amount of incoming replays and size of the training batch
             checkpoint_level (int): defines the interval of saving net params
         """
-        self.env_list = env_list
+        if isinstance(env, list):
+            self.env_list = env
+        else:
+            self.env = env
         self.agent = agent
 
         self.n_batches = n_batches
@@ -69,7 +72,7 @@ class Trainer:
         self.agent.eps = 1
         self.agent.eval = True
         for _ in range(self.n_batches_warm):
-            self.play_batch()
+            self.play_batch_successively()
 
         # ======= TRAINING =======
         
@@ -85,7 +88,7 @@ class Trainer:
         for i_batch in range(1, self.n_batches+1):
             # collect batch of replays
             self.agent.eval = False
-            batch_scores, batch_wins = self.play_batch()
+            batch_scores, batch_wins = self.play_batch_successively()
 
             # decrease exploration chance
             self.agent.eps = max(eps_end, eps_decay * self.agent.eps)
@@ -107,7 +110,7 @@ class Trainer:
         # return "guys"
         return self.train_timers, self.train_win_rates, self.test_timers, self.test_win_rates
 
-    def play_batch(self):
+    def play_batch_parallel(self):
         envs_number = len(self.env_list)
         
         state_size = self.env_list[0].state.size
@@ -153,7 +156,7 @@ class Trainer:
         
         return batch_scores, batch_wins
 
-    def play_batch_old(self):
+    def play_batch_successively(self):
         """
         Play episodes to get at least `self.play_batch_size` of replays.
         
@@ -180,7 +183,7 @@ class Trainer:
         # play until batch of replays is collected
         while (self.agent.memory.n_seen - before < self.play_batch_size):
             
-            # do single episode
+            # play single episode
             episode_score, episode_win = self.play_episode()
             
             # collect stats
@@ -207,7 +210,7 @@ class Trainer:
         while not self.env.isover():
 
             # agent-environment interaction
-            action = self.agent.act(state)
+            action = self.agent.act_single(state)
             next_state, reward, done = self.env.step(action)
 
             # collect replay
@@ -256,7 +259,11 @@ class Trainer:
         )
 
     def test(self, log_game=True, return_result=False):
-        env = self.env_list[0]
+        env = None
+        if hasattr(self, 'env_list'):
+            env = self.env_list[0]
+        else:
+            env = self.env
 
         output = None
         if log_game:

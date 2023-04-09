@@ -6,20 +6,36 @@ import torch
 class PrioritizedReplayBuffer:
     def __init__(
         self, state_size, buffer_size=int(1e5), batch_size=64,
-        alpha=0.4, beta=0.9, beta_growth_rate=1.001, update_beta_every=3000,
-        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        alpha=0.4, beta=1, beta_growth_rate=1, update_beta_every=3000,
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        n_step=1, gamma=1
     ):
-        self.buffer = cpprb.PrioritizedReplayBuffer(
-            buffer_size, {
-                "state": {"shape": state_size},
-                "action": {"dtype": np.int64},
-                "reward": {},
-                "next_state": {"shape": state_size},
-                "done": {"dtype": np.bool8},
-                # "indexes" and "weights" are generated automatically
-            },
-            alpha=alpha
-        )
+        buffer_fields = {
+            "state": {"shape": state_size},
+            "action": {"dtype": np.int64},
+            "reward": {},
+            "next_state": {"shape": state_size},
+            "done": {"dtype": np.bool8},
+            # "indexes" and "weights" are generated automatically
+        },
+
+        self.n_step = n_step
+        if n_step > 1:
+            self.buffer = cpprb.PrioritizedReplayBuffer(
+                buffer_size, buffer_fields, alpha=alpha,
+                Nstep = {
+                    # to automatically sum discounted rewards over next `n_step` steps
+                    "size": n_step,
+                    "gamma": gamma,
+                    "rew": "reward",
+                    # to automatically return `n_step`th state in `sample()`
+                    "next": "next_state"
+                }
+            )
+        else:
+            self.buffer = cpprb.PrioritizedReplayBuffer(
+                buffer_size, buffer_fields, alpha=alpha
+            )
 
         self.beta = beta
         self.beta_growth_rate = beta_growth_rate
@@ -70,17 +86,34 @@ class PrioritizedReplayBuffer:
 class ReplayBuffer:
     def __init__(
         self, state_size, buffer_size=int(1e5), batch_size=64,
-        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        n_step=1, gamma=1
     ):
-        self.buffer = cpprb.ReplayBuffer(
-            buffer_size, {
-                "state": {"shape": state_size},
-                "action": {"dtype": np.int64},
-                "reward": {},
-                "next_state": {"shape": state_size},
-                "done": {"dtype": np.bool8},
-            }
-        )
+        buffer_fields = {
+            "state": {"shape": state_size},
+            "action": {"dtype": np.int64},
+            "reward": {},
+            "next_state": {"shape": state_size},
+            "done": {"dtype": np.bool8},
+        }
+
+        self.n_step = n_step
+        if n_step > 1:
+            self.buffer = cpprb.ReplayBuffer(
+                buffer_size, buffer_fields,
+                Nstep = {
+                    # to automatically sum discounted rewards over next `n_step` steps
+                    "size": n_step,
+                    "gamma": gamma,
+                    "rew": "reward",
+                    # to automatically return `n_step`th state in `sample()`
+                    "next": "next_state"
+                }
+            )
+        else:
+            self.buffer = cpprb.ReplayBuffer(
+                buffer_size, buffer_fields
+            )
 
         self.batch_size = batch_size
         self.device = device

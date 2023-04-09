@@ -2,145 +2,162 @@
 
 import numpy as np
 import random
+from functools import partial
+from typing import List
 
 from dqn.model import QNetwork
-from dqn.replay_buffer import ReplayBuffer
 from environment.environment import BaseAction, BaseState
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-import math
-
-BUFFER_SIZE = int(1e5)      # replay buffer size
-BATCH_SIZE = 64             # minibatch size
-GAMMA = 1                   # discount factor
-TAU = 1e-3                  # for soft update of target parameters
-LR = 5e-4                   # Adam learning rate
-UPDATE_NN_EVERY = 2         # how often to update the network
-
-# prioritized experience replay
-UPDATE_MEM_EVERY = 20          # how often to update the sample
-UPDATE_MEM_PAR_EVERY = 3000    # how often to update the hyperparameters
-SAMPLE_SIZE = math.ceil(BATCH_SIZE * UPDATE_MEM_EVERY / UPDATE_NN_EVERY)    # ??
-
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+from torch.optim import Adam
 
 
 class Agent():
     """Interacts with and learns from the environment."""
 
-    def __init__(self, state_size, action_size, action_constructor,
-                 seed=0, compute_weights=False, priority_rate=None):
-        """Initialize an Agent object.
-        Params
-        ======
-            state_size (int): dimension of each state
-            action_size (int): dimension of each action
-            action_constructor: function taking `nn_output` and returning action instance
-            seed (int): random seed
-        """
+    def __init__(
+        self, state_size, action_size, action_constructor, replay_buffer, seed=0,
+        gamma=1, tau=1e-3,
+        optimizer=partial(Adam, lr=5e-4),
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    ):
         self.seed = random.seed(seed)
-        
+
         self.state_size = state_size
         self.action_size = action_size
         self.action_constructor = action_constructor
+        self.memory = replay_buffer
 
         # Q-Network
         self.qnetwork_local = QNetwork(
-            state_size, action_size, seed).float().to(DEVICE)
+            state_size, action_size, seed).float().to(device)
         self.qnetwork_target = QNetwork(
-            state_size, action_size, seed).float().to(DEVICE)
-        self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=LR)
+            state_size, action_size, seed).float().to(device)
+        self.device = device
+        self.optimizer = optimizer(self.qnetwork_local.parameters())
         self.criterion = nn.MSELoss()
         self.loss = None
-
-        # Replay memory
-        self.memory = ReplayBuffer(
-            action_size, BUFFER_SIZE, BATCH_SIZE, SAMPLE_SIZE, seed, compute_weights, priority_rate)
-        self.compute_weights = compute_weights
+        # to implement pytorch-like logic of network regimes train and eval
+        # if True, then `learn()` method won't be called
+        self.eval = True
+        self.eps = None
 
         # Initialize time steps
-        self.t_step_nn = 0
-        self.t_step_mem_par = 0
-        self.t_step_mem = 0
+        self.t = 0
 
-    def step(self, state:BaseState, action:BaseAction, reward, next_state:BaseState, done):
+        # update params
+        self.gamma = gamma
+        self.tau = tau
+
+        # validation
+        if not (0 <= gamma <= 1):
+            raise ValueError(
+                f'Discount factor `gamma` must be float in [0,1], but given: {gamma}')
+        if not (0 <= tau <= 1):
+            raise ValueError(
+                f'Soft update coefficient `tau` must be float in [0,1], but given: {tau}')
+
+    def add(self, state: np.ndarray | BaseState, action: BaseAction, reward, next_state: BaseState, done):
         """
         Runs internal processes:
         - update replay buffer state
         - run one epoch train
         """
         # save experience in replay memory
-        self.memory.add(state.value, action.value, reward, next_state.value, done)
+        self.memory.add(
+            state=state if isinstance(state, np.ndarray) else state.value,
+            action=action.value,
+            reward=reward,
+            next_state=next_state.value,
+            done=done)
+        if done:
+            self.memory.on_episode_end()
 
         # check for updates
-        self.t_step_nn = (self.t_step_nn + 1) % UPDATE_NN_EVERY
-        self.t_step_mem = (self.t_step_mem + 1) % UPDATE_MEM_EVERY
-        self.t_step_mem_par = (self.t_step_mem_par + 1) % UPDATE_MEM_PAR_EVERY
+        self.t += 1
 
-        if self.t_step_mem_par == 0:
-            self.memory.update_parameters()
+        if self.t % 2 == 0 and not self.eval:
+            self.learn()
 
-        if self.t_step_nn == 0:
-            if self.memory.n_collected > SAMPLE_SIZE:
-                # if enough samples are available in memory
-                # get random subset and learn
-                self.learn(self.memory.sample(), GAMMA)
-        
-        if self.t_step_mem == 0:
-            self.memory.update_sample()
-
-    def act(self, state:BaseState, eps=.0):
-        """Returns actions for given state as per current policy.
-
-        Params
-        ======
-            eps (float): epsilon, for epsilon-greedy action selection
-        """
+    def act_single(self, state: BaseState):
+        """Returns action for given state"""
         nn_output = None
-        if random.random() > eps:
+        if random.random() > self.eps:
             # greedy action based on Q function
             self.qnetwork_local.eval()
             with torch.no_grad():
-                input = torch.from_numpy(state.value).float().to(DEVICE)
-                nn_output = self.qnetwork_local(input)
-            self.qnetwork_local.train()
+                nn_output = self.qnetwork_local(
+                    torch.from_numpy(state.value).float().unsqueeze(0).to(self.device)
+                )
         else:
             # exploration action
             nn_output = torch.randn(self.action_size)
-            
+
         return self.action_constructor(nn_output.cpu().data.numpy())
+    
+    def act(self, states: List[np.ndarray]):
+        """Returns actions for given batch of states"""
+        play_batch_size = len(states)
+        states = np.array(states)
+        
+        # for each game define what action to choose: greedy or exporative
+        explore_ind = []
+        greedy_ind = []
+        events = np.random.uniform(low=0, high=1, size=play_batch_size)
+        for i in range(play_batch_size):
+            if events[i] < self.eps:
+                explore_ind.append(i)
+            else:
+                greedy_ind.append(i)
 
-    # разобраться подробнее
-    def learn(self, sampling, gamma):
-        """Update value parameters using given batch of experience tuples.
+        # to store result
+        nn_output = torch.empty((play_batch_size, self.action_size)).to(self.device)
+        
+        # greedy action based on Q function
+        self.qnetwork_local.eval()
+        with torch.no_grad():
+            nn_output[greedy_ind] = self.qnetwork_local(
+                torch.from_numpy(states[greedy_ind])
+                    .float()
+                    .unsqueeze(0)
+                    .to(self.device)
+            )
+        
+        # explorative action
+        nn_output[explore_ind] = torch.randn(len(explore_ind), self.action_size).to(self.device)
 
-        Params
-        ======
-            sampling (Tuple[torch.Tensor]): tuple of (s, a, r, s', done) tuples 
-            gamma (float): discount factor
-        """
-        states, actions, rewards, next_states, dones, weights, indices = sampling
+        # convert to `BaseAction` inheritant
+        res = []
+        for out in nn_output.data.cpu().numpy():
+            res.append(self.action_constructor(out))
+        return res
 
-        # Q-function over all actions
-        q_target = self.qnetwork_target(next_states)\
-                        .detach().max(1)[0].unsqueeze(1)
+    def learn(self):
+        """Update net params using batch sampled from replay buffer"""
+        batch = self.memory.sample()
 
-        # expected return
-        expected_values = rewards + gamma * q_target * (1 - dones)
+        # Q-function
+        self.qnetwork_target.eval()
+        q_target = self.qnetwork_target(
+            batch['next_state']
+        ).detach().max(1)[0].unsqueeze(1)
+
+        # discounted return
+        expected_values = batch['reward'] + self.gamma ** self.memory.n_step * q_target * (~batch['done'])
 
         # predicted return
-        output = self.qnetwork_local(states).gather(1, actions)
+        self.qnetwork_local.train()
+        output = self.qnetwork_local(
+            batch['state']
+        ).gather(1, batch['action'].long())
 
-        loss = F.mse_loss(output, expected_values)
-
-        # in case replays have weights
-        if self.compute_weights:
-            # why no grad??
-            with torch.no_grad():
-                loss *= sum(np.multiply(weights, loss.data.cpu().numpy()))
+        # MSE( Q_L(s_t, a_t); r_t + gamma * max_a Q_T(s_{t+1}, a) )
+        if 'weights' in batch.keys():
+            loss = torch.sum(batch['weights'] * (output - expected_values) ** 2)
+        else:
+            loss = torch.sum((output - expected_values) ** 2)
 
         # to print during training
         self.loss = torch.sqrt(loss).cpu().item()
@@ -151,11 +168,12 @@ class Agent():
         self.optimizer.step()
 
         # update target network
-        self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
+        self.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
 
-        # update priorities basing on loss
-        tds = (expected_values - output.detach()).abs().cpu().numpy()
-        self.memory.update_priorities(tds, indices)
+        if 'indexes' in batch.keys():
+            # update priorities basing on TD-error
+            tds = (expected_values - output.detach()).abs().cpu().numpy()
+            self.memory.update_priorities(batch['indexes'], tds)
 
     def soft_update(self, local_model, target_model, tau):
         """Soft update model parameters.
