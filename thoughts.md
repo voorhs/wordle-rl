@@ -66,6 +66,7 @@
 ## Многошаговая оценка таргета
 
 Формула:
+
 $$
 Q_{t:t+n}=R_t+\gamma R_{t+1}+\ldots+\gamma^{n-1}R_{t+n-1}+\gamma^n\max_a Q(S_{t+n},a).
 $$
