@@ -4,8 +4,6 @@ import torch
 
 
 class PrioritizedReplayBuffer:
-    is_prioritized = True
-
     def __init__(
         self, state_size, buffer_size=int(1e5), batch_size=64,
         alpha=0.4, beta=0.9, beta_growth_rate=1.001, update_beta_every=3000,
@@ -28,7 +26,8 @@ class PrioritizedReplayBuffer:
         self.update_beta_every = update_beta_every
         self.batch_size = batch_size
 
-        self.t = 0
+        # number of replays seen (but maybe not stored, because of `buffer_size` restriction)
+        self.n_seen = 0
         self.device = device
 
         if beta_growth_rate < 1:
@@ -41,8 +40,8 @@ class PrioritizedReplayBuffer:
     def add(self, **observation):
         self.buffer.add(**observation)
 
-        self.t = (self.t + 1) % self.update_beta_every
-        if self.t == 0:
+        self.n_seen += 1
+        if self.n_seen % self.update_beta_every == 0:
             self.beta = min(1, self.beta * self.beta_growth_rate)
 
     def sample(self):
@@ -52,6 +51,7 @@ class PrioritizedReplayBuffer:
         batch_device = {}
         for key, value in batch.items():
             if key == 'indexes':
+                # batch['indexes'] is only used for updating priorities
                 continue
             batch_device[key] = torch.from_numpy(value).to(self.device)
 
@@ -84,12 +84,16 @@ class ReplayBuffer:
 
         self.batch_size = batch_size
         self.device = device
+        
+        # number of replays seen (but maybe not stored, because of `buffer_size` restriction)
+        self.n_seen = 0
 
         if not (batch_size <= buffer_size):
             raise ValueError(
                 f'Invalid sizes provided: `batch_size`={batch_size}, `buffer_size`={buffer_size}')
 
     def add(self, **observation):
+        self.n_seen += 1
         self.buffer.add(**observation)
 
     def sample(self):

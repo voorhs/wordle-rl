@@ -19,7 +19,7 @@ class Agent():
 
     def __init__(
         self, state_size, action_size, action_constructor, replay_buffer, seed=0,
-        update_nn_every=2, gamma=1, tau=1e-3, n_warm=500,
+        gamma=1, tau=1e-3,
         optimizer=partial(Adam, lr=5e-4),
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ):
@@ -47,14 +47,15 @@ class Agent():
         self.optimizer = optimizer(self.qnetwork_local.parameters())
         self.criterion = nn.MSELoss()
         self.loss = None
-
-        self.n_warm = n_warm
+        # to implement pytorch-like logic of network regimes train and eval
+        # if True, then `learn()` method won't be called
+        self.eval = True
+        self.eps = None
 
         # Initialize time steps
         self.t = 0
 
         # update params
-        self.update_nn_every = update_nn_every
         self.gamma = gamma
         self.tau = tau
 
@@ -66,7 +67,7 @@ class Agent():
             raise ValueError(
                 f'Soft update coefficient `tau` must be float in [0,1], but given: {tau}')
 
-    def step(self, state: BaseState, action: BaseAction, reward, next_state: BaseState, done):
+    def add(self, state: BaseState, action: BaseAction, reward, next_state: BaseState, done):
         """
         Runs internal processes:
         - update replay buffer state
@@ -83,14 +84,12 @@ class Agent():
             self.memory.on_episode_end()
 
         # check for updates
-        self.t = (self.t + 1) % self.update_nn_every
+        self.t += 1
 
-        if (self.t == 0) and (self.memory.get_stored_size() >= self.n_warm):
-            # if enough samples are available in memory
-            # get random subset and learn
-            self.learn(self.memory.sample(), self.gamma)
+        if self.t % 2 == 0:
+            self.learn()
         
-    def act(self, state: BaseState, eps=.0):
+    def act(self, state: BaseState):
         """Returns actions for given state as per current policy.
 
         Params
@@ -98,36 +97,34 @@ class Agent():
             eps (float): epsilon, for epsilon-greedy action selection
         """
         nn_output = None
-        if random.random() > eps:
+        if random.random() > self.eps:
             # greedy action based on Q function
             self.qnetwork_local.eval()
             with torch.no_grad():
                 nn_output = self.qnetwork_local(
-                    torch.from_numpy(state.value).float().to(self.device)
+                    torch.from_numpy(state.value).float().unsqueeze(0).to(self.device)
                 )
-            self.qnetwork_local.train()
         else:
             # exploration action
             nn_output = torch.randn(self.action_size)
 
         return self.action_constructor(nn_output.cpu().data.numpy())
 
-    def learn(self, batch, gamma):
-        """Update value parameters using given batch of experience tuples.
+    def learn(self):
+        """Update net params using batch sampled from replay buffer"""
+        batch = self.memory.sample()
 
-        Params
-        ======
-            gamma (float): discount factor
-        """
         # Q-function
+        self.qnetwork_target.eval()
         q_target = self.qnetwork_target(
             batch['next_state']
         ).detach().max(1)[0].unsqueeze(1)
 
         # discounted return
-        expected_values = batch['reward'] + gamma * q_target * (~batch['done'])
+        expected_values = batch['reward'] + self.gamma * q_target * (~batch['done'])
 
         # predicted return
+        self.qnetwork_local.train()
         output = self.qnetwork_local(
             batch['state']
         ).gather(1, batch['action'].long())
@@ -149,8 +146,8 @@ class Agent():
         # update target network
         self.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
 
-        # update priorities basing on TD-error
         if 'indexes' in batch.keys():
+            # update priorities basing on TD-error
             tds = (expected_values - output.detach()).abs().cpu().numpy()
             self.memory.update_priorities(batch['indexes'], tds)
 
