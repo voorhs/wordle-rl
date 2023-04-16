@@ -18,23 +18,22 @@ class Agent():
     """Interacts with and learns from the environment."""
 
     def __init__(
-        self, state_size, action_size, action_constructor, replay_buffer, seed=0,
-        gamma=1, tau=1e-3,
+        self, state_size, action_instance, replay_buffer, seed=0,
+        gamma=1, tau=1e-3, optimize_interval=8,
         optimizer=partial(Adam, lr=5e-4),
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ):
         self.seed = random.seed(seed)
 
         self.state_size = state_size
-        self.action_size = action_size
-        self.action_constructor = action_constructor
+        self.action = action_instance
         self.memory = replay_buffer
 
         # Q-Network
         self.qnetwork_local = QNetwork(
-            state_size, action_size, seed).float().to(device)
+            state_size, self.action.size, seed).float().to(device)
         self.qnetwork_target = QNetwork(
-            state_size, action_size, seed).float().to(device)
+            state_size, self.action.size, seed).float().to(device)
         self.device = device
         self.optimizer = optimizer(self.qnetwork_local.parameters())
         self.criterion = nn.MSELoss()
@@ -50,6 +49,7 @@ class Agent():
         # update params
         self.gamma = gamma
         self.tau = tau
+        self.optimize_interval = optimize_interval
 
         # validation
         if not (0 <= gamma <= 1):
@@ -78,7 +78,7 @@ class Agent():
         # check for updates
         self.t += 1
 
-        if self.t % 2 == 0 and not self.eval:
+        if self.t % self.optimize_interval == 0 and not self.eval:
             self.learn()
 
     def act_single(self, state: BaseState):
@@ -93,11 +93,11 @@ class Agent():
                 )
         else:
             # exploration action
-            nn_output = torch.randn(self.action_size)
+            nn_output = torch.randn(1, self.action.size)
 
-        return self.action_constructor(nn_output.cpu().data.numpy())
+        return self.action(nn_output)
     
-    def act(self, states: List[np.ndarray]):
+    def act_batch(self, states: List[np.ndarray]):
         """Returns actions for given batch of states"""
         play_batch_size = len(states)
         states = np.array(states)
@@ -113,26 +113,22 @@ class Agent():
                 greedy_ind.append(i)
 
         # to store result
-        nn_output = torch.empty((play_batch_size, self.action_size)).to(self.device)
+        nn_output = torch.empty((play_batch_size, self.action.size)).to(self.device)
         
-        # greedy action based on Q function
+        # greedy action
         self.qnetwork_local.eval()
         with torch.no_grad():
             nn_output[greedy_ind] = self.qnetwork_local(
                 torch.from_numpy(states[greedy_ind])
                     .float()
-                    .unsqueeze(0)
                     .to(self.device)
             )
         
         # explorative action
-        nn_output[explore_ind] = torch.randn(len(explore_ind), self.action_size).to(self.device)
+        nn_output[explore_ind] = torch.randn(len(explore_ind), self.action.size).to(self.device)
 
         # convert to `BaseAction` inheritant
-        res = []
-        for out in nn_output.data.cpu().numpy():
-            res.append(self.action_constructor(out))
-        return res
+        return self.action(nn_output)
 
     def learn(self):
         """Update net params using batch sampled from replay buffer"""
@@ -140,24 +136,22 @@ class Agent():
 
         # Q-function
         self.qnetwork_target.eval()
-        q_target = self.qnetwork_target(
-            batch['next_state']
-        ).detach().max(1)[0].unsqueeze(1)
+        nn_output = self.qnetwork_target(batch['next_state']).detach()
+        q_target = self.action(nn_output).qfunc.max(1)[0].unsqueeze(1)
 
         # discounted return
         expected_values = batch['reward'] + self.gamma ** self.memory.n_step * q_target * (~batch['done'])
 
         # predicted return
         self.qnetwork_local.train()
-        output = self.qnetwork_local(
-            batch['state']
-        ).gather(1, batch['action'].long())
+        nn_output = self.qnetwork_local(batch['state'])
+        q_local = self.action(nn_output).qfunc.gather(1, batch['action'].long())
 
         # MSE( Q_L(s_t, a_t); r_t + gamma * max_a Q_T(s_{t+1}, a) )
         if 'weights' in batch.keys():
-            loss = torch.sum(batch['weights'] * (output - expected_values) ** 2)
+            loss = torch.sum(batch['weights'] * (q_local - expected_values) ** 2)
         else:
-            loss = torch.sum((output - expected_values) ** 2)
+            loss = torch.sum((q_local - expected_values) ** 2)
 
         # to print during training
         self.loss = torch.sqrt(loss).cpu().item()
@@ -172,7 +166,7 @@ class Agent():
 
         if 'indexes' in batch.keys():
             # update priorities basing on TD-error
-            tds = (expected_values - output.detach()).abs().cpu().numpy()
+            tds = (expected_values - q_local.detach()).abs().cpu().numpy()
             self.memory.update_priorities(batch['indexes'], tds)
 
     def soft_update(self, local_model, target_model, tau):

@@ -16,7 +16,7 @@ class Trainer:
             self,
             env: List[Environment] | Environment, agent: Agent,
             logging_interval=None, checkpoint_interval=None,
-            play_batch_size=None,
+            play_batch_size=8, is_parallel=True,
             n_batches=32, n_batches_warm=8,
         ):
         """
@@ -26,6 +26,7 @@ class Trainer:
             n_batches (int): number of batches to play and learn from during training
             n_batches_warm (int): size of initial experience to be collected before training
             play_batch_size (int): to strike a balance between the amount of incoming replays and size of the training batch
+            is_parallel (bool): if True, then self.play_batch_parallel() is used, self.play_batch_successively() otherwise
             checkpoint_level (int): defines the interval of saving net params
         """
         if isinstance(env, list):
@@ -34,11 +35,9 @@ class Trainer:
             self.env = env
         self.agent = agent
 
+        self.is_parallel = is_parallel
         self.n_batches = n_batches
         self.n_batches_warm = n_batches_warm
-        
-        if play_batch_size is None:
-            play_batch_size = agent.memory.batch_size
         self.play_batch_size = play_batch_size
 
         if checkpoint_interval is None:
@@ -66,16 +65,21 @@ class Trainer:
 
         self.start_time = time()
 
+        if self.is_parallel:
+            play_batch = self.play_batch_parallel
+        else:
+            play_batch = self.play_batch_successively
+
         # ======= COLLECT INITIAL EXPERIENCE =======
 
         # don't update net and 100% explore
         self.agent.eps = 1
         self.agent.eval = True
         for _ in range(self.n_batches_warm):
-            self.play_batch_successively()
+            play_batch()
 
         # ======= TRAINING =======
-        
+
         # these guys are the main goal of training (because we aim to experiment with all methods)
         self.train_timers = []
         self.test_timers = []
@@ -88,7 +92,7 @@ class Trainer:
         for i_batch in range(1, self.n_batches+1):
             # collect batch of replays
             self.agent.eval = False
-            batch_scores, batch_wins = self.play_batch_successively()
+            batch_scores, batch_wins = play_batch()
 
             # decrease exploration chance
             self.agent.eps = max(eps_end, eps_decay * self.agent.eps)
@@ -136,7 +140,7 @@ class Trainer:
                 indexes.append(i)
             
             # feed batch to agent
-            actions = self.agent.act(states[indexes])
+            actions = self.agent.act_batch(states[indexes])
 
             all_is_over = True
             for i, action in zip(indexes, actions):

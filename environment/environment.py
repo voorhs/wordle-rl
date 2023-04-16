@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from collections import defaultdict
 from wordle.wordlenp import Wordle
+from environment.action import BaseAction
 
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -23,23 +24,6 @@ class BaseState:
 
     def copy(self):
         """Return deep copy of state instance."""
-        raise NotImplementedError()
-
-
-class BaseAction:
-    def size(self):
-        """Return size of action space."""
-        raise NotImplementedError()
-
-    def set_action(self, nn_output):
-        raise NotImplementedError()
-
-    def get_word(self):
-        """Return guess corresponding to action instance"""
-        raise NotImplementedError()
-
-    def copy_like(self, nn_output):
-        """Make new action instance of the same class."""
         raise NotImplementedError()
 
 
@@ -147,7 +131,7 @@ class StateYesNo(BaseState):
         copy = StateYesNo(answer=self.answer, steps=self.init_steps)
         copy.isknown = self.isknown.copy()
         copy.isin = self.isin.copy()
-        copy.steps = self.init_steps
+        copy.steps = self.steps
         copy.coloring = self.coloring.copy()
         return copy
 
@@ -183,33 +167,6 @@ class StateVocabulary(StateYesNo):
         copy.steps = self.init_steps
         copy.coloring = self.coloring.copy()
         return copy
-
-
-VOCABULARY = Wordle._load_vocabulary('wordle/guesses.txt', astype=list)
-
-
-class ActionVocabulary(BaseAction):
-    """Action is an index of word in list of possible answers."""
-
-    def __init__(self, nn_output, vocabulary=None):
-        self.value = np.argmax(nn_output)
-        self.vocabulary = vocabulary
-        if vocabulary is None:
-            self.vocabulary = VOCABULARY
-
-    def size(self):
-        return len(self.vocabulary)
-
-    def set_action(self, nn_output):
-        # nn_output is vector of size as number of all possible guesses
-        # which entries contain estimated q values
-        self.value = np.argmax(nn_output)
-
-    def get_word(self):
-        return self.vocabulary[self.value]
-
-    def copy_like(self, nn_output):
-        return ActionVocabulary(nn_output, self.vocabulary)
 
 
 # разделить методы на основные и вспомогательные
