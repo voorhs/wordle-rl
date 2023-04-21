@@ -61,7 +61,7 @@ class StateYesNo(BaseState):
 
     def step(self, action:BaseAction, pattern, done=None):
         self.steps -= 1
-        guess = action.get_word()
+        guess = action.word
         yes_letters = []
 
         # mark all green letters as 'yes'
@@ -193,7 +193,7 @@ class Environment:
 
     def step(self, action: BaseAction, output=None):
         # convert action to str guess
-        guess = action.get_word()
+        guess = action.word
 
         # send guess to Wordle instance
         pattern = self.wordle.send_guess(guess)

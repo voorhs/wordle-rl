@@ -18,7 +18,7 @@ class Agent():
     """Interacts with and learns from the environment."""
 
     def __init__(
-        self, state_size, action_instance, replay_buffer, seed=0,
+        self, state_size, action_instance:BaseAction, replay_buffer, seed=0,
         gamma=1, tau=1e-3, optimize_interval=8,
         optimizer=partial(Adam, lr=5e-4),
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -68,7 +68,7 @@ class Agent():
         # save experience in replay memory
         self.memory.add(
             state=state if isinstance(state, np.ndarray) else state.value,
-            action=action.value,
+            action=action.index,
             reward=reward,
             next_state=next_state.value,
             done=done)
@@ -137,7 +137,7 @@ class Agent():
         # Q-function
         self.qnetwork_target.eval()
         nn_output = self.qnetwork_target(batch['next_state']).detach()
-        q_target = self.action(nn_output).qfunc.max(1)[0].unsqueeze(1)
+        q_target = self.action(nn_output).qfunc
 
         # discounted return
         expected_values = batch['reward'] + self.gamma ** self.memory.n_step * q_target * (~batch['done'])
@@ -145,7 +145,7 @@ class Agent():
         # predicted return
         self.qnetwork_local.train()
         nn_output = self.qnetwork_local(batch['state'])
-        q_local = self.action(nn_output).qfunc.gather(1, batch['action'].long())
+        q_local = self.action(nn_output, index=batch['action'].long()).qfunc
 
         # MSE( Q_L(s_t, a_t); r_t + gamma * max_a Q_T(s_{t+1}, a) )
         if 'weights' in batch.keys():
