@@ -6,7 +6,8 @@ from functools import partial
 from typing import List
 
 from dqn.model import QNetwork
-from environment.environment import BaseAction, BaseState
+from environment.environment import BaseState
+from environment.action import BaseAction, ActionEmbedding
 
 import torch
 import torch.nn as nn
@@ -21,7 +22,8 @@ class Agent():
         self, state_size, action_instance:BaseAction, replay_buffer, seed=0,
         gamma=1, tau=1e-3, optimize_interval=8,
         optimizer=partial(Adam, lr=5e-4),
-        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        model_path=None
     ):
         self.seed = random.seed(seed)
 
@@ -34,6 +36,13 @@ class Agent():
             state_size, self.action.size, seed).float().to(device)
         self.qnetwork_target = QNetwork(
             state_size, self.action.size, seed).float().to(device)
+        if model_path is not None:
+            self.qnetwork_local.load_state_dict(torch.load(
+                model_path['local'],
+            ))
+            self.qnetwork_target.load_state_dict(torch.load(
+                model_path['target'],
+            ))
         self.device = device
         self.optimizer = optimizer(self.qnetwork_local.parameters())
         self.criterion = nn.MSELoss()
@@ -83,6 +92,9 @@ class Agent():
 
     def act_single(self, state: BaseState):
         """Returns action for given state"""
+        if isinstance(self.action, ActionEmbedding):
+            return self.act_single_embedding(state)
+        
         nn_output = None
         if random.random() > self.eps:
             # greedy action based on Q function
@@ -112,6 +124,9 @@ class Agent():
             else:
                 greedy_ind.append(i)
 
+        if isinstance(self.action, ActionEmbedding):
+            return self.act_batch_embedding(states, explore_ind, greedy_ind)
+
         # to store result
         nn_output = torch.empty((play_batch_size, self.action.size)).to(self.device)
         
@@ -130,22 +145,77 @@ class Agent():
         # convert to `BaseAction` inheritant
         return self.action(nn_output)
 
+    def act_single_embedding(self, state):
+        index = None
+        if random.random() > self.eps:
+            # greedy action based on Q function
+            self.qnetwork_local.eval()
+            with torch.no_grad():
+                greedy_act = self.qnetwork_local(
+                    torch.from_numpy(state.value).float().unsqueeze(0).to(self.device)
+                )
+            index = self.action(greedy_act).index
+        else:
+            # exploration action
+            index = torch.tensor(
+                np.random.choice(len(self.action.vocabulary))
+            )
+
+        return self.action.act(index=index)
+
+    def act_batch_embedding(self, states: np.ndarray, explore_ind, greedy_ind):
+        """Ugly branch to incorporate ActionEmbedding cases."""
+        
+        # indices of words in vocabulary
+        index = torch.empty(states.shape[0]).long()
+
+        # make greedy actions
+        if greedy_ind:
+            self.qnetwork_local.eval()
+            with torch.no_grad():
+                # tuple (qfunc, embeddings)
+                greedy_acts = self.qnetwork_local(
+                    torch.from_numpy(states[greedy_ind])
+                        .float()
+                        .to(self.device)
+                )
+            # calculate indexes (knn)
+            index[greedy_ind] = self.action(greedy_acts).index
+
+        if explore_ind:
+            # calculate explorative indexes
+            index[explore_ind] = torch.from_numpy(
+                np.random.choice(len(self.action.vocabulary), len(explore_ind))
+            )
+        
+        # convert to ActionEmbedding object
+        return self.action.act(index=index)
+
     def learn(self):
         """Update net params using batch sampled from replay buffer"""
         batch = self.memory.sample()
 
         # Q-function
+        q_target = None
         self.qnetwork_target.eval()
-        nn_output = self.qnetwork_target(batch['next_state']).detach()
-        q_target = self.action(nn_output).qfunc
+        if not isinstance(self.action, ActionEmbedding):
+            nn_output = self.qnetwork_target(batch['next_state']).detach()
+            q_target = self.action(nn_output).qfunc
+        else:
+            q_target, _ = self.qnetwork_target(batch['next_state'])
 
         # discounted return
         expected_values = batch['reward'] + self.gamma ** self.memory.n_step * q_target * (~batch['done'])
 
         # predicted return
+        q_local = None
         self.qnetwork_local.train()
-        nn_output = self.qnetwork_local(batch['state'])
-        q_local = self.action(nn_output, index=batch['action'].long()).qfunc
+        if not isinstance(self.action, ActionEmbedding):
+            nn_output = self.qnetwork_local(batch['state'])
+            q_local = self.action(nn_output, index=batch['action'].long()).qfunc
+        else:
+            embeddings = self.action.get_embeddings(batch['action'].long())
+            q_local, _ = self.qnetwork_local(batch['state'], embeddings)
 
         # MSE( Q_L(s_t, a_t); r_t + gamma * max_a Q_T(s_{t+1}, a) )
         if 'weights' in batch.keys():
@@ -182,3 +252,12 @@ class Agent():
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
             target_param.data.copy_(
                 tau * local_param.data + (1.0 - tau) * target_param.data)
+
+    def dump_models(self, nickname):
+        model_path = {
+            'local': f'{nickname}-local.pth',
+            'target': f'{nickname}-target.pth'
+        }
+        torch.save(self.qnetwork_local.state_dict(), model_path['local'])
+        torch.save(self.qnetwork_target.state_dict(), model_path['target'])
+        return model_path

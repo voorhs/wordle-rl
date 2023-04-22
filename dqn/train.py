@@ -3,6 +3,7 @@
 import torch
 import numpy as np
 
+from tqdm.notebook import tqdm_notebook as tqdm
 from collections import deque
 from time import time
 from datetime import datetime
@@ -75,7 +76,7 @@ class Trainer:
         # don't update net and 100% explore
         self.agent.eps = 1
         self.agent.eval = True
-        for _ in range(self.n_batches_warm):
+        for _ in tqdm(range(self.n_batches_warm), desc='WARM BATCHES'):
             play_batch()
 
         # ======= TRAINING =======
@@ -89,7 +90,7 @@ class Trainer:
         # slowly decreasing exporation
         self.agent.eps = eps_start
 
-        for i_batch in range(1, self.n_batches+1):
+        for i_batch in tqdm(range(1, self.n_batches+1), desc='TRAIN BATCHES'):
             # collect batch of replays
             self.agent.eval = False
             batch_scores, batch_wins = play_batch()
