@@ -120,7 +120,7 @@ class Wordle:
         # return pattern and flag that guess is equal to answer
         return pattern, is_green.all()
 
-    def reset(self, replace=True):
+    def reset(self, for_test=False):
         # reset inner data
         self.guesses = []
         self.win = None
@@ -131,16 +131,19 @@ class Wordle:
         
         if self.current_answer == 0:
             # if sampled words are over make new sample
-            self.answers_sequence = self._sample_answers(replace)
+            self.answers_sequence = self._sample_answers(for_test)
         
         # update answer for new game
         self.answer = self._prepoc(self.answers_sequence[self.current_answer])
     
-    def _sample_answers(self, replace):
+    def _sample_answers(self, for_test):
+        if for_test:
+            return [ans for ans in self.answers]
+        
         indices = np.random.choice(
             len(self.answers),
-            size=len(self.answers),
-            replace=replace)
+            size=len(self.answers)
+        )
         return [self.answers[i] for i in indices]
 
     @staticmethod

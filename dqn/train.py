@@ -7,15 +7,16 @@ from tqdm.notebook import tqdm_notebook as tqdm
 from collections import deque
 from time import time
 from datetime import datetime
-from typing import List
+from typing import List, Union
 
 from environment.environment import Environment
 from dqn.agent import Agent
 
+
 class Trainer:
     def __init__(
             self,
-            env: List[Environment] | Environment, agent: Agent,
+            env: Union[List[Environment], Environment], agent: Agent,
             logging_interval=None, checkpoint_interval=None,
             play_batch_size=8, is_parallel=True,
             n_batches=32, n_batches_warm=8,
@@ -23,7 +24,7 @@ class Trainer:
         """
         Params
         ------
-            logging_level (int): defines size of sliding window of batches to calculate and print stats from
+            logging_interval (int): defines size of sliding window of batches to calculate and print stats from
             n_batches (int): number of batches to play and learn from during training
             n_batches_warm (int): size of initial experience to be collected before training
             play_batch_size (int): to strike a balance between the amount of incoming replays and size of the training batch
@@ -49,7 +50,7 @@ class Trainer:
             logging_interval = max(n_batches // 8, 1)
         self.logging_interval = logging_interval
 
-    def train(self, eps_start=1.0, eps_end=0.05, eps_decay=0.999, nickname=None):
+    def train(self, eps_start=1.0, eps_end=0.05, eps_decay=0.999, nickname=None, test_first=False):
         """Requires params to define exploration during training"""
         
         # for saving net checkpoints as "<nickname>-<num>.pth"
@@ -87,6 +88,10 @@ class Trainer:
         self.train_win_rates = []
         self.test_win_rates = []
 
+        if test_first:
+            self.agent.eval = True
+            self.log_test(0, 0)
+
         # slowly decreasing exporation
         self.agent.eps = eps_start
 
@@ -120,6 +125,12 @@ class Trainer:
         
         state_size = self.env_list[0].state.size
         states = np.empty((envs_number, state_size))
+
+        # last env always gives hard examples
+        # if hasattr(self, 'success') and np.sum(self.success == 0) > 0:
+        #     answers = self.env_list[0].wordle.answers
+        #     self.env_list[-1].wordle.answers = np.array(answers)[self.success == 0].tolist()
+        #     self.env_list[-1].wordle.current_answer = -1
 
         # reset all environments
         for env in self.env_list:
@@ -244,24 +255,32 @@ class Trainer:
         eps = self.agent.eps
 
         self.agent.eps = 0
-        test_scores, test_win_rate, mean_steps = self.test(return_result=True)
+        self.success, test_win_rate, mean_steps = self.test(return_result=True)
         self.agent.eps = eps
 
         self.test_timers.append(elapsed_time)
         self.test_win_rates.append(test_win_rate)
 
-        print(
-            f'\nBatch {i_batch:4d}',
-            f'Time: {elapsed_time:.0f} s',
-            # f'RMSE: {self.agent.loss:.4f}' if self.agent.loss else f'RMSE: None',
-            f'Agent Eps: {self.agent.eps:.2f}',
-            # f'Train Score: {np.mean(self.scores):.2f}',
-            f'Train Win Rate: {self.train_win_rates[-1]:.2f}%',
-            # f'Test Score: {test_scores:.2f}',
-            f'Test Win Rate: {test_win_rate:.2f}%',
-            f'Test Mean Steps: {mean_steps:.2f}',
-            sep='\t'
-        )
+        if i_batch == 0:
+            print(
+                f'\nBatch {i_batch:4d}',
+                f'Test Win Rate: {test_win_rate:.2f}%',
+                f'Test Mean Steps: {mean_steps:.2f}',
+                sep='\t'
+            )
+        else:
+            print(
+                f'\nBatch {i_batch:4d}',
+                f'Time: {elapsed_time:.0f} s',
+                # f'RMSE: {self.agent.loss:.4f}' if self.agent.loss else f'RMSE: None',
+                f'Agent Eps: {self.agent.eps:.2f}',
+                # f'Train Score: {np.mean(self.scores):.2f}',
+                f'Train Win Rate: {self.train_win_rates[-1]:.2f}%',
+                # f'Test Score: {test_scores:.2f}',
+                f'Test Win Rate: {test_win_rate:.2f}%',
+                f'Test Mean Steps: {mean_steps:.2f}',
+                sep='\t'
+            )
 
     def test(self, log_game=True, return_result=False):
         env = None
@@ -289,7 +308,7 @@ class Trainer:
         for i_episode in range(n_episodes):
 
             # begin new episode
-            state = env.reset(replace=False)
+            state = env.reset(for_test=True)
             
             if log_game:
                 with open(output, 'a') as f:
@@ -331,6 +350,7 @@ class Trainer:
                         f'Test Score: {scores}'
                 ]))
 
-        self.t += 1
+        if hasattr(self, 't'):
+            self.t += 1
         if return_result:
-            return scores, win_rate, mean_steps
+            return success, win_rate, mean_steps
