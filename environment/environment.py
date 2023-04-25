@@ -225,8 +225,8 @@ class Environment:
                 self.collected[color].add(guess[i])
         return result
 
-    def reset(self, replace=True):
-        self.wordle.reset(replace)
+    def reset(self, for_test=False):
+        self.wordle.reset(for_test)
         self.state.reset(self.wordle.answer)
         self.collected = {color: set() for color in ['B', 'Y', 'G']}
         return self.state.copy()
