@@ -172,10 +172,28 @@ class ActionLetters(BaseAction):
         return self.ohe_matrix[:, torch.LongTensor(sub_indices)]
 
 
-class ActionCombLetters(ActionLetters):
+class ActionCombLetters(BaseAction):
     def __init__(self, vocabulary, nn_output=None, index=None, ohe_matrix=None, k=1, wordle_list=None):
         self.k = k
-        super().__init__(vocabulary, nn_output, index, ohe_matrix, wordle_list)
+        self._vocabulary = vocabulary
+
+        if ohe_matrix is not None:
+            self.ohe_matrix = ohe_matrix
+            if wordle_list is not None:
+                self.ohe_matrix = self._sub_ohe(wordle_list)
+        else:
+            self.ohe_matrix = self._ohe()
+        
+        self._size = self.ohe_matrix.shape[0]
+    
+        if nn_output is not None:
+            if index is not None:
+                self._index = index
+                self._qfunc = (nn_output @ self.ohe_matrix).gather(1, index)
+            else:
+                self._qfunc, self._index = (nn_output @ self.ohe_matrix).max(1, keepdim=True)
+        elif index is not None:
+            self._index = index
     
     def _ohe(self):
         # list of OHEs for all k
@@ -225,6 +243,26 @@ class ActionCombLetters(ActionLetters):
 
         return torch.cat(res, dim=0)
 
+    def _init_dict(self):
+        return {
+            'k': self.k,
+            'ohe_matrix': self.ohe_matrix,
+            **super()._init_dict()
+        }
+
+    def _sub_ohe(self, wordle_list):
+        """
+        Select specific words from `ohe_matrix`. Used for solving subproblems.
+
+        Params
+        ------
+        wordle_list, Iterable[str]: full list of Wordle words
+        """
+        sub_indices = []
+        for word in self.vocabulary:
+            sub_indices.append(wordle_list.index(word))
+        
+        return self.ohe_matrix[:, torch.LongTensor(sub_indices)]
 
 # ======= EMBEDDING =======
 from annoy import AnnoyIndex

@@ -3,7 +3,7 @@
 import numpy as np
 import random
 from functools import partial
-from typing import List
+from typing import List, Union
 
 from dqn.model import QNetwork
 from environment.environment import BaseState
@@ -68,7 +68,7 @@ class Agent():
             raise ValueError(
                 f'Soft update coefficient `tau` must be float in [0,1], but given: {tau}')
 
-    def add(self, state: np.ndarray | BaseState, action: BaseAction, reward, next_state: BaseState, done):
+    def add(self, state: Union[np.ndarray, BaseState], action: BaseAction, reward, next_state: BaseState, done):
         """
         Runs internal processes:
         - update replay buffer state
