@@ -46,6 +46,11 @@ class BaseAction:
     def word(self) -> str:
         return self.vocabulary[self.index]
 
+    # for compatibility with max entropy solution
+    def __init__(self, word, index=0):
+        self._vocabulary = [word]
+        self._index = index
+
     @property
     def qfunc(self):
         return self._qfunc
