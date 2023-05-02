@@ -391,6 +391,61 @@ class Embedding(nn.Module):
         
         return total_loss / len(dataloader.dataset)
 
+class EmbeddingSmart(nn.Module):
+    """
+    Skip-gram model on pairs of Wordle words with shared letters. Scalar product version.
+    """
+    def __init__(self, vocab_size=12972, emb_size=10):
+        super().__init__()
+        
+        self.vocab_size = vocab_size
+        self.emb_size = emb_size
+
+        self.table = nn.Embedding(self.vocab_size, self.emb_size),
+    
+    def forward(self, x, y, is_negative):
+        """x, torch.Tensor: OHE vector representing word in vocabulary."""
+        # compute similarity between two embeddings
+        score = torch.sum(self.table(x) * self.table(y)) / torch.sqrt(self.emb_size)
+        
+        if is_negative:
+            score = score * (-1)
+
+        # retur probability of having similar word
+        return nn.functional.sigmoid(score)
+    
+    def get_table(self):
+        """Retrieve embedding table."""
+        return self.table.weight.data.detach()
+
+    def train_epoch_dot_product(self, dataloader, loss_fn, optimizer, device):
+        total_loss = 0.
+        
+        self.train()
+        for batch in tqdm(dataloader, desc='TRAIN BATCHES'):
+            # send to device
+            words_1, words_2 = batch[0].to(device), batch[1].to(device)
+            
+            # forward pass
+            self.zero_grad()
+            positive_probs = self(words_1, words_2, is_negative=False)
+            # === generate negative pairs and compute negative score ===
+            negative_probs = ...
+
+            # use custom loss function
+            loss = loss_fn(positive_probs, negative_probs)
+
+            # collect stats
+            total_loss += loss.item()
+            
+            # compute gradients
+            loss.backward()
+
+            # update net params
+            optimizer.step()
+        
+        return total_loss / len(dataloader.dataset)
+
 
 class ActionEmbedding(BaseAction):
     """Compatible only with ConvexQNetwork."""
