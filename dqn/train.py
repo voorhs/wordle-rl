@@ -7,59 +7,79 @@ from tqdm.notebook import tqdm_notebook as tqdm
 from collections import deque
 from time import time
 from datetime import datetime
+import os
 from typing import List, Union
 
-from environment.environment import Environment
+from environment.environment import Environment, StateYesNo
+from environment.action import ActionCombLetters
+from wordle.wordlenp import Wordle
+from replay_buffer.cpprb import ReplayBuffer, PrioritizedReplayBuffer
 from dqn.agent import Agent
 
 
 class Trainer:
     def __init__(
-            self,
-            env: Union[List[Environment], Environment], agent: Agent,
-            logging_interval=None, checkpoint_interval=None,
-            play_batch_size=8, is_parallel=True,
-            n_batches=32, n_batches_warm=8,
+            self, agent: Agent,
+            train_env: Union[List[Environment], Environment],
+            test_env: Environment,
+            logging_interval=None,
+            n_batches=32, n_batches_warm=8, play_batch_size=8, is_parallel=True,
+            nickname=None, test_first=True
         ):
         """
         Params
         ------
-            logging_interval (int): defines size of sliding window of batches to calculate and print stats from
-            n_batches (int): number of batches to play and learn from during training
-            n_batches_warm (int): size of initial experience to be collected before training
-            play_batch_size (int): to strike a balance between the amount of incoming replays and size of the training batch
-            is_parallel (bool): if True, then self.play_batch_parallel() is used, self.play_batch_successively() otherwise
-            checkpoint_level (int): defines the interval of saving net params
+            logging_interval    (int): defines size of sliding window of batches to calculate and print stats from
+            checkpoint_interval (int): defines the interval for saving agent's net params
+            n_batches           (int): number of batches to play and learn from during training
+            n_batches_warm      (int): size of initial experience to be collected before training
+            play_batch_size     (int): to strike a balance between the amount of incoming replays and size of the training batch
+            is_parallel        (bool): if True, then self.play_batch_parallel() is used, self.play_batch_successively() otherwise
+            nickname            (str): directory name for saving checkpoints and other files
         """
-        if isinstance(env, list):
-            self.env_list = env
-        else:
-            self.env = env
         self.agent = agent
+
+        if isinstance(train_env, list):
+            self.train_env_list = train_env
+        else:
+            self.train_env = train_env
+        self.test_env = test_env
 
         self.is_parallel = is_parallel
         self.n_batches = n_batches
         self.n_batches_warm = n_batches_warm
         self.play_batch_size = play_batch_size
 
-        if checkpoint_interval is None:
-            checkpoint_interval = n_batches
-        self.checkpoint_interval = checkpoint_interval
-
         if logging_interval is None:
             logging_interval = max(n_batches // 8, 1)
         self.logging_interval = logging_interval
 
-    def train(self, eps_start=1.0, eps_end=0.05, eps_decay=0.999, nickname=None, test_first=False):
-        """Requires params to define exploration during training"""
+        if self.is_parallel:
+            self.play_batch = self.play_batch_parallel
+        else:
+            self.play_batch = self.play_batch_successively
         
-        # for saving net checkpoints as "<nickname>-<num>.pth"
+        # create directory named `nickname`
         if nickname is None:
-            nickname = 'checkpoint' + datetime.fromtimestamp(time()).strftime("%d-%m-%Y-%H:%M:%S")
+            nickname = datetime.fromtimestamp(time()).strftime("%d-%m-%Y-%H:%M:%S")
         self.nickname = nickname
-        
+        i = 1
+        while os.path.exists(self.nickname):
+            if self.nickname.endswith(f'-{i-1}'):
+                self.nickname = self.nickname.replace(f'-{i-1}', f'-{i}')
+            elif i == 1:
+                self.nickname += f'-{i}'
+            i += 1
+
+        os.mkdir(self.nickname)
+
+        self.test_first = test_first
+        self.train_output = None
+
+    def train(self, eps_start=1.0, eps_end=0.05, eps_decay=0.999):
+        """Requires params to define exploration during training"""
         # for saving text reports of gameplays (self.test(log_game=True))
-        self.t = 0
+        self.t = -1
 
         # rewards and indicators of win; used for sliding window progress print
         self.scores = deque(maxlen=self.logging_interval)
@@ -67,18 +87,13 @@ class Trainer:
 
         self.start_time = time()
 
-        if self.is_parallel:
-            play_batch = self.play_batch_parallel
-        else:
-            play_batch = self.play_batch_successively
-
         # ======= COLLECT INITIAL EXPERIENCE =======
 
         # don't update net and 100% explore
         self.agent.eps = 1
         self.agent.eval = True
         for _ in tqdm(range(self.n_batches_warm), desc='WARM BATCHES'):
-            play_batch()
+            self.play_batch()
 
         # ======= TRAINING =======
 
@@ -88,7 +103,7 @@ class Trainer:
         self.train_win_rates = []
         self.test_win_rates = []
 
-        if test_first:
+        if self.test_first:
             self.agent.eval = True
             self.log_test(0, 0)
 
@@ -98,7 +113,7 @@ class Trainer:
         for i_batch in tqdm(range(1, self.n_batches+1), desc='TRAIN BATCHES'):
             # collect batch of replays
             self.agent.eval = False
-            batch_scores, batch_wins = play_batch()
+            batch_scores, batch_wins = self.play_batch()
 
             # decrease exploration chance
             self.agent.eps = max(eps_end, eps_decay * self.agent.eps)
@@ -108,32 +123,25 @@ class Trainer:
             self.log_train(batch_scores, batch_wins, elapsed_time)
             self.agent.eval = True
             self.log_test(i_batch, elapsed_time)
-
-            if i_batch % self.checkpoint_interval == 0:
-                # save net params
-                print('\nSaving checkpoint...', end=' ')
-                num = i_batch // self.checkpoint_interval
-                filename = f'{self.nickname}-{num}.pth'
-                torch.save(self.agent.qnetwork_local.state_dict(), filename)
-                print(f'Saved to {filename}')
+            self.save_checkpoint(i_batch)
         
         # return "guys"
         return self.train_timers, self.train_win_rates, self.test_timers, self.test_win_rates
 
+    def save_checkpoint(self, i_batch):
+        if i_batch % self.logging_interval != 0:
+            return
+            
+        self.agent.dump(self.nickname, self.t) 
+
     def play_batch_parallel(self):
-        envs_number = len(self.env_list)
+        envs_number = len(self.train_env_list)
         
-        state_size = self.env_list[0].state.size
+        state_size = self.train_env_list[0].state.size
         states = np.empty((envs_number, state_size))
 
-        # last env always gives hard examples
-        # if hasattr(self, 'success') and np.sum(self.success == 0) > 0:
-        #     answers = self.env_list[0].wordle.answers
-        #     self.env_list[-1].wordle.answers = np.array(answers)[self.success == 0].tolist()
-        #     self.env_list[-1].wordle.current_answer = -1
-
         # reset all environments
-        for env in self.env_list:
+        for env in self.train_env_list:
             env.reset()
 
         # to store stats
@@ -144,7 +152,7 @@ class Trainer:
         while not all_is_over:
             # collect batch of states from envs that are not finished yet
             indexes = []
-            for i, env in enumerate(self.env_list):
+            for i, env in enumerate(self.train_env_list):
                 if env.isover():
                     continue
 
@@ -157,7 +165,7 @@ class Trainer:
             all_is_over = True
             for i, action in zip(indexes, actions):
                 # send action to env
-                next_state, reward, done = self.env_list[i].step(action)
+                next_state, reward, done = self.train_env_list[i].step(action, self.train_output)
 
                 # save replay to agent's buffer
                 self.agent.add(states[i], action, reward, next_state, done)
@@ -166,7 +174,7 @@ class Trainer:
                 batch_scores[i] += reward
 
                 if done:
-                    batch_wins[i] = self.env_list[i].wordle.win
+                    batch_wins[i] = self.train_env_list[i].wordle.win
                 else:
                     all_is_over = False
         
@@ -281,18 +289,20 @@ class Trainer:
                 f'Test Mean Steps: {mean_steps:.2f}',
                 sep='\t'
             )
+        
+        self.train_output = f'{self.nickname}/train-{self.t}.txt'
 
     def test(self, log_game=True, return_result=False):
         env = None
-        if hasattr(self, 'env_list'):
-            env = self.env_list[0]
+        if hasattr(self, 'test_env_list'):
+            env = self.test_env_list[0]
         else:
-            env = self.env
+            env = self.test_env
 
         output = None
         if log_game:
             # output file to show how agent played (text report of gameplay)
-            output = f'{self.nickname}-{self.t}.txt'
+            output = f'{self.nickname}/test-{self.t}.txt'
 
         # number of test words
         n_episodes = len(env.wordle.answers)
@@ -309,10 +319,6 @@ class Trainer:
 
             # begin new episode
             state = env.reset(for_test=True)
-            
-            if log_game:
-                with open(output, 'a') as f:
-                    f.write(f'Episode {i_episode+1}\tAnswer {state.answer}\n')
 
             # until end of episode
             while not env.isover():
@@ -326,11 +332,6 @@ class Trainer:
                 steps[i_episode] += 1
 
                 state = next_state
-
-            if log_game:
-                # end of episode
-                with open(output, 'a') as f:
-                    f.write(f"Score {scores[i_episode]}\t{'WIN' if env.wordle.win else 'LOSE'}\n\n")
 
             # collect statistics
             success[i_episode] = env.wordle.win
@@ -354,3 +355,102 @@ class Trainer:
             self.t += 1
         if return_result:
             return success, win_rate, mean_steps
+
+    def train_comb_letters(
+        data, n_envs, optimize_interval, agent_path, n_batches, n_batches_warm,
+        k=1, alpha=0, eps_start=1, eps_end=0.05, eps_decay=0.9995
+    ):
+        global rewards, ohe1, ohe2, wordle_list, tasks_results
+
+        train_answers, test_answers, guesses = data
+        
+        # create train list of parallel games 
+        train_env_list = []
+        for _ in range(n_envs):
+            env = Environment(
+                rewards=rewards,
+                wordle=Wordle(vocabulary=guesses, answers=train_answers),
+                state_instance=StateYesNo()
+            )
+            train_env_list.append(env)
+        state_size = train_env_list[0].state.size
+
+        # test env 
+        test_env = Environment(
+            rewards=rewards,
+            wordle=Wordle(vocabulary=guesses, answers=test_answers),
+            state_instance=StateYesNo()
+        )
+
+        replay_buffer = None
+        if alpha == 0:
+            replay_buffer = ReplayBuffer(state_size=state_size)
+        else:
+            replay_buffer = PrioritizedReplayBuffer(state_size=state_size, alpha=alpha)
+
+        # create agent with weights from `agent_path`
+        agent = Agent(
+            state_size=state_size,
+            action_instance=ActionCombLetters(
+                k=k, vocabulary=guesses,
+                ohe_matrix= ohe1 if k == 1 else ohe2,
+                wordle_list=wordle_list
+            ),
+            replay_buffer=replay_buffer,
+            optimize_interval=optimize_interval,
+            agent_path=agent_path
+        )
+
+        # to track experiments
+        problem_name = f'{len(test_answers)}-{len(guesses)}'
+        method_name = f'comb-letters-{k}'
+        nickname = f'{method_name}-{problem_name}'
+
+        # training and evaluating utilities
+        trainer = Trainer(
+            agent=agent,
+            train_env=train_env_list,
+            test_env=test_env,
+            play_batch_size=len(train_env_list),
+            n_batches=n_batches,
+            n_batches_warm=n_batches_warm,
+            nickname=nickname
+        )
+
+        res = trainer.train(
+            eps_start=eps_start,
+            eps_end=eps_end,
+            eps_decay=eps_decay,
+        )
+
+        # save metrics
+        tasks_results[problem_name][method_name] = res
+        
+        return nickname
+    
+    def train_test_split(n_guesses, overfit, guesses, indices, in_answers):
+        guesses_cur = guesses[indices[:n_guesses]]
+        
+        train_indices = []
+        test_indices = []
+        for i_guess in indices[:n_guesses]:
+            if i_guess in in_answers:
+                test_indices.append(i_guess)
+            else:
+                train_indices.append(i_guess)
+
+        if overfit:
+            train_answers_cur = guesses[test_indices]
+        else:
+            train_answers_cur = guesses[train_indices]
+        
+        test_answers_cur = guesses[test_indices]
+
+        print(
+            f'guesses: {len(guesses_cur)}',
+            f'train answers: {len(train_answers_cur)}',
+            f'test answers: {len(test_answers_cur)}' + (' (overfit strategy)' if overfit else ''),
+            sep='\n'
+        )
+
+        return train_answers_cur, test_answers_cur, guesses_cur

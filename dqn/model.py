@@ -11,7 +11,7 @@ from functools import partial
 class QNetwork(nn.Module):
     """Actor (Policy) Model."""
 
-    def __init__(self, state_size, action_size, seed, hidden_size=256):
+    def __init__(self, state_size, action_size, seed=None, hidden_size=256):
         """Initialize parameters and build model.
         Params
         ======
@@ -20,7 +20,8 @@ class QNetwork(nn.Module):
             seed (int): Random seed
         """
         super().__init__()
-        self.seed = torch.manual_seed(seed)
+        if seed is not None:
+            self.seed = torch.manual_seed(seed)
         self.fc1 = nn.Linear(state_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, action_size)

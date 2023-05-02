@@ -23,7 +23,7 @@ class Agent():
         gamma=1, tau=1e-3, optimize_interval=8,
         optimizer=partial(Adam, lr=5e-4),
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-        model_path=None
+        agent_path=None
     ):
         self.seed = random.seed(seed)
 
@@ -32,17 +32,16 @@ class Agent():
         self.memory = replay_buffer
 
         # Q-Network
-        self.qnetwork_local = QNetwork(
-            state_size, self.action.size, seed).float().to(device)
-        self.qnetwork_target = QNetwork(
-            state_size, self.action.size, seed).float().to(device)
-        if model_path is not None:
+        self.qnetwork_local = QNetwork(state_size, self.action.size, seed).float().to(device)
+        self.qnetwork_target = QNetwork(state_size, self.action.size, seed).float().to(device)
+        if agent_path is not None:
             self.qnetwork_local.load_state_dict(torch.load(
-                model_path['local'],
+                agent_path['local'],
             ))
             self.qnetwork_target.load_state_dict(torch.load(
-                model_path['target'],
+                agent_path['target'],
             ))
+            self.memory.buffer.load_transitions(agent_path['buffer'])
         self.device = device
         self.optimizer = optimizer(self.qnetwork_local.parameters())
         self.criterion = nn.MSELoss()
@@ -253,11 +252,35 @@ class Agent():
             target_param.data.copy_(
                 tau * local_param.data + (1.0 - tau) * target_param.data)
 
-    def dump_models(self, nickname):
-        model_path = {
-            'local': f'{nickname}-local.pth',
-            'target': f'{nickname}-target.pth'
+    def dump(self, nickname, t):
+        agent_path = {
+            'local': f'{nickname}/local-{t}.pth',
+            'target': f'{nickname}/target-{t}.pth',
+            'buffer': f'{nickname}/buffer-{t}.npz'
         }
-        torch.save(self.qnetwork_local.state_dict(), model_path['local'])
-        torch.save(self.qnetwork_target.state_dict(), model_path['target'])
-        return model_path
+        torch.save(self.qnetwork_local.state_dict(), agent_path['local'])
+        torch.save(self.qnetwork_target.state_dict(), agent_path['target'])
+        self.memory.buffer.save_transitions(agent_path['buffer'])
+
+        return agent_path
+    
+    def load_backbone(self, model_path):
+        # local network
+        backbone_local = QNetwork(self.state_size, 120).float().to(self.device)
+        backbone_local.load_state_dict(torch.load(model_path))
+
+        self.qnetwork_local.fc1.load_state_dict(backbone_local.state_dict())
+        self.qnetwork_local.fc1.requires_grad_(False)
+
+        self.qnetwork_local.fc2.load_state_dict(backbone_local.state_dict())
+        self.qnetwork_local.fc2.requires_grad_(False)
+        
+        # target network
+        backbone_target = QNetwork(self.state_size, 120).float().to(self.device)
+        backbone_target.load_state_dict(torch.load(model_path))
+        
+        self.qnetwork_target.fc1.load_state_dict(backbone_target.state_dict())
+        self.qnetwork_target.fc1.requires_grad_(False)
+
+        self.qnetwork_target.fc2.load_state_dict(backbone_target.state_dict())
+        self.qnetwork_target.fc2.requires_grad_(False)

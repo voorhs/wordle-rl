@@ -229,6 +229,11 @@ class Environment:
         self.wordle.reset(for_test)
         self.state.reset(self.wordle.answer)
         self.collected = {color: set() for color in ['B', 'Y', 'G']}
+        word = ''.join(self.wordle.answer)
+        title = 'Episode'
+        if for_test:
+            title = 'Answer'
+        self.game_report = f'{title} {self.wordle.current_answer}: {word}\n'
         return self.state.copy()
 
     def isover(self):
@@ -236,14 +241,19 @@ class Environment:
         return self.wordle.isover()
 
     def _print_coloring(self, output, guess, pattern, reward):
-        with open(output, mode='a') as f:
-            for i, p in enumerate(pattern):
-                if p == 'B':
-                    f.write('{:^7}'.format(guess[i].upper()))
-                elif p == 'Y':
-                    f.write('{:^7}'.format('*'+guess[i].upper()+'*'))
-                elif p == 'G':
-                    f.write('{:^7}'.format('**'+guess[i].upper()+'**'))
-            f.write(f'\treward: {reward}\n')    # end of word line
-            if self.isover():
-                f.write('\n')   # end of wordle board
+        for i, p in enumerate(pattern):
+            letter = guess[i].upper()
+            if p == 'B':
+                self.game_report += f'{letter:^7}'
+            elif p == 'Y':
+                self.game_report += f'{"*"+letter+"*":^7}'
+            elif p == 'G':
+                self.game_report += f"{'**'+letter+'**':^7}"
+
+        self.game_report += '\n'
+
+        # end of wordle board
+        if self.isover():
+            self.game_report += 'WIN\n\n' if self.wordle.win else 'LOSE\n\n'
+            open(output, mode='a').write(self.game_report)
+            self.game_report = ''
