@@ -5,7 +5,7 @@ import random
 from functools import partial
 from typing import List, Union
 
-from dqn.model import QNetwork
+from dqn.model import QNetwork, BackboneQNetwork
 from environment.environment import BaseState
 from environment.action import BaseAction, ActionEmbedding
 
@@ -19,33 +19,32 @@ class Agent():
     """Interacts with and learns from the environment."""
 
     def __init__(
-        self, state_size, action_instance:BaseAction, replay_buffer, seed=0,
+        self, state_size, action_instance:BaseAction, replay_buffer,
         gamma=1, tau=1e-3, optimize_interval=8,
-        optimizer=partial(Adam, lr=5e-4),
-        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-        agent_path=None
+        agent_path=None, **model_params
     ):
-        self.seed = random.seed(seed)
-
         self.state_size = state_size
         self.action = action_instance
         self.memory = replay_buffer
 
         # Q-Network
-        self.qnetwork_local = QNetwork(state_size, self.action.size, seed).float().to(device)
-        self.qnetwork_target = QNetwork(state_size, self.action.size, seed).float().to(device)
+        self.define_model(**model_params)
+        
+        # load checkpoint
         if agent_path is not None:
-            self.qnetwork_local.load_state_dict(torch.load(
-                agent_path['local'],
-            ))
-            self.qnetwork_target.load_state_dict(torch.load(
-                agent_path['target'],
-            ))
-            self.memory.buffer.load_transitions(agent_path['buffer'])
-        self.device = device
-        self.optimizer = optimizer(self.qnetwork_local.parameters())
+            if 'local' in agent_path.keys():
+                self.qnetwork_local.load_state_dict(torch.load(agent_path['local']))
+            if 'target' in agent_path.keys():
+                self.qnetwork_target.load_state_dict(torch.load(agent_path['target']))
+            if 'buffer' in agent_path.keys():
+                self.memory.buffer.load_transitions(agent_path['buffer'])
+        
+        if agent_path is not None and 'optimizer' in agent_path.keys():
+            self.optimizer.load_state_dict(torch.load(agent_path['optimizer']))
+        
         self.criterion = nn.MSELoss()
         self.loss = None
+
         # to implement pytorch-like logic of network regimes train and eval
         # if True, then `learn()` method won't be called
         self.eval = True
@@ -66,6 +65,13 @@ class Agent():
         if not (0 <= tau <= 1):
             raise ValueError(
                 f'Soft update coefficient `tau` must be float in [0,1], but given: {tau}')
+
+    def define_model(self, **model_params):
+        self.device = model_params.get('device', torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
+        model = model_params.get('model', QNetwork)
+        self.qnetwork_local = model(self.state_size, self.action.size, **model_params).float().to(self.device)
+        self.qnetwork_target = model(self.state_size, self.action.size, **model_params).float().to(self.device)
+        self.optimizer = model_params.get('optimizer', partial(Adam, lr=5e-4))(self.qnetwork_local.parameters())
 
     def add(self, state: Union[np.ndarray, BaseState], action: BaseAction, reward, next_state: BaseState, done):
         """
@@ -256,31 +262,31 @@ class Agent():
         agent_path = {
             'local': f'{nickname}/local-{t}.pth',
             'target': f'{nickname}/target-{t}.pth',
-            'buffer': f'{nickname}/buffer-{t}.npz'
+            'buffer': f'{nickname}/buffer-{t}.npz',
+            'optimizer': f'{nickname}/optimizer-{t}.pth',
         }
         torch.save(self.qnetwork_local.state_dict(), agent_path['local'])
         torch.save(self.qnetwork_target.state_dict(), agent_path['target'])
         self.memory.buffer.save_transitions(agent_path['buffer'])
+        torch.save(self.optimizer.state_dict(), agent_path['optimizer'])
 
         return agent_path
     
     def load_backbone(self, model_path):
         # local network
-        backbone_local = QNetwork(self.state_size, 120).float().to(self.device)
+        backbone_local = BackboneQNetwork(self.state_size, 130).float().to(self.device)
         backbone_local.load_state_dict(torch.load(model_path))
 
-        self.qnetwork_local.fc1.load_state_dict(backbone_local.state_dict())
-        self.qnetwork_local.fc1.requires_grad_(False)
-
-        self.qnetwork_local.fc2.load_state_dict(backbone_local.state_dict())
-        self.qnetwork_local.fc2.requires_grad_(False)
+        self.qnetwork_local.layers[0].load_state_dict(backbone_local.fc1.state_dict())
+        self.qnetwork_local.layers[1].load_state_dict(backbone_local.fc2.state_dict())
         
         # target network
-        backbone_target = QNetwork(self.state_size, 120).float().to(self.device)
+        backbone_target = BackboneQNetwork(self.state_size, 130).float().to(self.device)
         backbone_target.load_state_dict(torch.load(model_path))
         
-        self.qnetwork_target.fc1.load_state_dict(backbone_target.state_dict())
-        self.qnetwork_target.fc1.requires_grad_(False)
+        self.qnetwork_target.layers[0].load_state_dict(backbone_target.fc1.state_dict())
+        self.qnetwork_target.layers[1].load_state_dict(backbone_target.fc2.state_dict())
 
-        self.qnetwork_target.fc2.load_state_dict(backbone_target.state_dict())
-        self.qnetwork_target.fc2.requires_grad_(False)
+    def freeze_layers(self):
+        self.qnetwork_local.freeze()
+        self.qnetwork_target.freeze()

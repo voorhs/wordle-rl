@@ -5,16 +5,18 @@ import numpy as np
 
 from tqdm.notebook import tqdm_notebook as tqdm
 from collections import deque
+from functools import partial
 from time import time
 from datetime import datetime
 import os
 from typing import List, Union
 
 from environment.environment import Environment, StateYesNo
-from environment.action import ActionCombLetters
+from environment.action import ActionCombLetters, ActionWagons, ActionVocabulary
 from wordle.wordlenp import Wordle
 from replay_buffer.cpprb import ReplayBuffer, PrioritizedReplayBuffer
 from dqn.agent import Agent
+from dqn.model import SkipConnectionQNetwork
 
 
 class Trainer:
@@ -79,7 +81,7 @@ class Trainer:
     def train(self, eps_start=1.0, eps_end=0.05, eps_decay=0.999):
         """Requires params to define exploration during training"""
         # for saving text reports of gameplays (self.test(log_game=True))
-        self.t = -1
+        self.t = 0
 
         # rewards and indicators of win; used for sliding window progress print
         self.scores = deque(maxlen=self.logging_interval)
@@ -120,10 +122,10 @@ class Trainer:
 
             # collect statistics (update those "guys")
             elapsed_time = time() - self.start_time
+            self.save_checkpoint(i_batch)
             self.log_train(batch_scores, batch_wins, elapsed_time)
             self.agent.eval = True
             self.log_test(i_batch, elapsed_time)
-            self.save_checkpoint(i_batch)
         
         # return "guys"
         return self.train_timers, self.train_win_rates, self.test_timers, self.test_win_rates
@@ -289,7 +291,8 @@ class Trainer:
                 f'Test Mean Steps: {mean_steps:.2f}',
                 sep='\t'
             )
-        
+            self.t += 1
+
         self.train_output = f'{self.nickname}/train-{self.t}.txt'
 
     def test(self, log_game=True, return_result=False):
@@ -351,17 +354,15 @@ class Trainer:
                         f'Test Score: {scores}'
                 ]))
 
-        if hasattr(self, 't'):
-            self.t += 1
         if return_result:
             return success, win_rate, mean_steps
 
     def train_comb_letters(
-        data, n_envs, optimize_interval, agent_path, n_batches, n_batches_warm,
-        k=1, alpha=0, eps_start=1, eps_end=0.05, eps_decay=0.9995
+        rewards, ohe1, ohe2, wordle_list, tasks_results, rb_size,
+        eps_start, eps_end, eps_decay, lr=5e-4, alpha=0, k=1,
+        logging_interval=None, method_name=None, fine_tune=False, backbone_path=None, *,
+        data, n_envs, optimize_interval, agent_path, n_batches, n_batches_warm
     ):
-        global rewards, ohe1, ohe2, wordle_list, tasks_results
-
         train_answers, test_answers, guesses = data
         
         # create train list of parallel games 
@@ -384,9 +385,9 @@ class Trainer:
 
         replay_buffer = None
         if alpha == 0:
-            replay_buffer = ReplayBuffer(state_size=state_size)
+            replay_buffer = ReplayBuffer(state_size=state_size, buffer_size=rb_size)
         else:
-            replay_buffer = PrioritizedReplayBuffer(state_size=state_size, alpha=alpha)
+            replay_buffer = PrioritizedReplayBuffer(state_size=state_size, alpha=alpha, buffer_size=rb_size)
 
         # create agent with weights from `agent_path`
         agent = Agent(
@@ -398,12 +399,23 @@ class Trainer:
             ),
             replay_buffer=replay_buffer,
             optimize_interval=optimize_interval,
-            agent_path=agent_path
+            agent_path=agent_path,
+            optimizer=partial(torch.optim.Adam, lr=lr),
+            model=SkipConnectionQNetwork
         )
+
+        if fine_tune:
+            if agent_path is None:
+                raise ValueError('Fine tune is possible only with provided weights')
+            agent.freeze_layers()
+        
+        if backbone_path is not None:
+            agent.load_backbone(backbone_path)
 
         # to track experiments
         problem_name = f'{len(test_answers)}-{len(guesses)}'
-        method_name = f'comb-letters-{k}'
+        if method_name is None:
+            method_name = 'comb-letters'
         nickname = f'{method_name}-{problem_name}'
 
         # training and evaluating utilities
@@ -414,7 +426,8 @@ class Trainer:
             play_batch_size=len(train_env_list),
             n_batches=n_batches,
             n_batches_warm=n_batches_warm,
-            nickname=nickname
+            nickname=nickname,
+            logging_interval=logging_interval
         )
 
         res = trainer.train(
@@ -426,9 +439,10 @@ class Trainer:
         # save metrics
         tasks_results[problem_name][method_name] = res
         
-        return nickname
+        return trainer.nickname
     
     def train_test_split(n_guesses, overfit, guesses, indices, in_answers):
+        guesses = np.array(guesses)
         guesses_cur = guesses[indices[:n_guesses]]
         
         train_indices = []
@@ -454,3 +468,165 @@ class Trainer:
         )
 
         return train_answers_cur, test_answers_cur, guesses_cur
+    
+    def train_wagons(
+        rewards, ohe, wordle_list, tasks_results, rb_size,
+        k, eps_start, eps_end, eps_decay, lr=5e-4, alpha=0, n_hidden_layers=1,
+        logging_interval=None, method_name=None, fine_tune=False, backbone_path=None, *,
+        data, n_envs, optimize_interval, agent_path, n_batches, n_batches_warm
+    ):
+        train_answers, test_answers, guesses = data
+        
+        # create train list of parallel games 
+        train_env_list = []
+        for _ in range(n_envs):
+            env = Environment(
+                rewards=rewards,
+                wordle=Wordle(vocabulary=guesses, answers=train_answers),
+                state_instance=StateYesNo()
+            )
+            train_env_list.append(env)
+        state_size = train_env_list[0].state.size
+
+        # test env 
+        test_env = Environment(
+            rewards=rewards,
+            wordle=Wordle(vocabulary=guesses, answers=test_answers),
+            state_instance=StateYesNo()
+        )
+
+        replay_buffer = None
+        if alpha == 0:
+            replay_buffer = ReplayBuffer(state_size=state_size, buffer_size=rb_size)
+        else:
+            replay_buffer = PrioritizedReplayBuffer(state_size=state_size, alpha=alpha, buffer_size=rb_size)
+
+        # create agent with weights from `agent_path`
+        agent = Agent(
+            state_size=state_size,
+            action_instance=ActionWagons(
+                k=k, vocabulary=guesses,
+                ohe_matrix=ohe,
+                wordle_list=wordle_list
+            ),
+            replay_buffer=replay_buffer,
+            optimize_interval=optimize_interval,
+            agent_path=agent_path,
+            optimizer=partial(torch.optim.Adam, lr=lr),
+            n_hidden_layers=n_hidden_layers
+        )
+
+        if backbone_path is not None:
+            agent.load_backbone(backbone_path)
+
+        if fine_tune:
+            agent.freeze_layers()
+
+        # to track experiments
+        problem_name = f'{len(test_answers)}-{len(guesses)}'
+        if method_name is None:
+            method_name = 'wagons'
+        nickname = f'{method_name}-{problem_name}'
+
+        # training and evaluating utilities
+        trainer = Trainer(
+            agent=agent,
+            train_env=train_env_list,
+            test_env=test_env,
+            play_batch_size=len(train_env_list),
+            n_batches=n_batches,
+            n_batches_warm=n_batches_warm,
+            nickname=nickname,
+            logging_interval=logging_interval
+        )
+
+        res = trainer.train(
+            eps_start=eps_start,
+            eps_end=eps_end,
+            eps_decay=eps_decay,
+        )
+
+        # save metrics
+        tasks_results[problem_name][method_name] = res
+        
+        return trainer.nickname
+    
+    def train_vocabulary(
+        rewards, tasks_results, rb_size,
+        eps_start, eps_end, eps_decay, lr=5e-4, alpha=0,
+        logging_interval=None, method_name=None, fine_tune=False, backbone_path=None, *,
+        data, n_envs, optimize_interval, agent_path, n_batches, n_batches_warm
+    ):
+        train_answers, test_answers, guesses = data
+        
+        # create train list of parallel games 
+        train_env_list = []
+        for _ in range(n_envs):
+            env = Environment(
+                rewards=rewards,
+                wordle=Wordle(vocabulary=guesses, answers=train_answers),
+                state_instance=StateYesNo()
+            )
+            train_env_list.append(env)
+        state_size = train_env_list[0].state.size
+
+        # test env 
+        test_env = Environment(
+            rewards=rewards,
+            wordle=Wordle(vocabulary=guesses, answers=test_answers),
+            state_instance=StateYesNo()
+        )
+
+        replay_buffer = None
+        if alpha == 0:
+            replay_buffer = ReplayBuffer(state_size=state_size, buffer_size=rb_size)
+        else:
+            replay_buffer = PrioritizedReplayBuffer(state_size=state_size, alpha=alpha, buffer_size=rb_size)
+
+        # create agent with weights from `agent_path`
+        agent = Agent(
+            state_size=state_size,
+            action_instance=ActionVocabulary(vocabulary=guesses),
+            replay_buffer=replay_buffer,
+            optimize_interval=optimize_interval,
+            agent_path=agent_path,
+            optimizer=partial(torch.optim.Adam, lr=lr)
+        )
+
+        if fine_tune:
+            if agent_path is None:
+                raise ValueError('Fine tune is possible only with provided weights')
+            agent.freeze_layers()
+        
+        if backbone_path is not None:
+            agent.load_backbone(backbone_path)
+
+        # to track experiments
+        problem_name = f'{len(test_answers)}-{len(guesses)}'
+        if method_name is None:
+            method_name = 'wagons'
+        nickname = f'{method_name}-{problem_name}'
+
+        # training and evaluating utilities
+        trainer = Trainer(
+            agent=agent,
+            train_env=train_env_list,
+            test_env=test_env,
+            play_batch_size=len(train_env_list),
+            n_batches=n_batches,
+            n_batches_warm=n_batches_warm,
+            nickname=nickname,
+            logging_interval=logging_interval
+        )
+
+        res = trainer.train(
+            eps_start=eps_start,
+            eps_end=eps_end,
+            eps_decay=eps_decay,
+        )
+
+        # save metrics
+        tasks_results[problem_name][method_name] = res
+        
+        return trainer.nickname
+    

@@ -11,7 +11,7 @@ from functools import partial
 class QNetwork(nn.Module):
     """Actor (Policy) Model."""
 
-    def __init__(self, state_size, action_size, seed=None, hidden_size=256):
+    def __init__(self, state_size, action_size, seed=None, hidden_size=256, n_hidden_layers=1, **kwargs):
         """Initialize parameters and build model.
         Params
         ======
@@ -22,14 +22,69 @@ class QNetwork(nn.Module):
         super().__init__()
         if seed is not None:
             self.seed = torch.manual_seed(seed)
-        self.fc1 = nn.Linear(state_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, action_size)
+        
+        layers = [nn.Linear(state_size, hidden_size)]
+        for _ in range(n_hidden_layers):
+            layers.append(nn.Linear(hidden_size, hidden_size))
+        self.layers = nn.ModuleList(layers)
+        self.output = nn.Linear(hidden_size, action_size)
 
-    def forward(self, state):
-        x = F.relu(self.fc1(state))
+    def forward(self, x):
+        for fc in self.layers:
+            x = F.relu(fc(x))
+        
+        return self.output(x)
+    
+    def freeze(self):
+        self.layers[0].requires_grad_(False)
+        self.layers[1].requires_grad_(False)
+
+
+class BackboneQNetwork(nn.Module):
+    def __init__(self, state_size, action_size, seed=0, **kwargs):
+        """Initialize parameters and build model.
+        Params
+        ======
+            state_size (int): Dimension of each state
+            action_size (int): Dimension of each action
+            seed (int): Random seed
+        """
+        super().__init__()
+        self.seed = torch.manual_seed(seed)
+        
+        self.fc1 = nn.Linear(state_size, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, action_size)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
+        
         return self.fc3(x)
+
+
+class SkipConnectionQNetwork(BackboneQNetwork):
+    def forward(self, x):
+        y = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(y))
+        
+        return self.fc3(x+y)
+    
+    def freeze(self):
+        self.fc1.requires_grad_(False)
+        self.fc2.requires_grad_(False)
+    
+
+class StackingOverBackbone(nn.Module):
+    def __init__(self, state_size, action_size, seed=0, **kwargs):
+        super().__init__()
+        self.seed = torch.manual_seed(seed)
+        
+        # skip connection anywhere?
+        self.fc1 = nn.Linear(state_size, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 130)
+        self.fc4 = nn.Linear(130, action_size)
 
 
 class ConvexQNetwork(nn.Module):

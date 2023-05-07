@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import itertools as it
 import bisect
+from math import ceil
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -127,7 +128,6 @@ class ActionLetters(BaseAction):
             matrix with letter-wise OHEs for each word in vocabulary
         """
         self._vocabulary = vocabulary
-        self._size = 26 * 5
 
         if ohe_matrix is not None:
             self.ohe_matrix = ohe_matrix
@@ -137,6 +137,8 @@ class ActionLetters(BaseAction):
             # W[i, j*26+k] = vocabulary[i][j] == 65+k,
             # i.e. indicates that jth letter of ith word is kth letter of alphabet
             self.ohe_matrix = self._ohe()
+
+        self._size = self.ohe_matrix.shape[0]
     
         if nn_output is not None:
             if index is not None:
@@ -269,10 +271,89 @@ class ActionCombLetters(BaseAction):
         
         return self.ohe_matrix[:, torch.LongTensor(sub_indices)]
 
+
+class ActionWagons(ActionLetters):
+    def __init__(self, vocabulary, nn_output=None, index=None, ohe_matrix=None, k=2, wordle_list=None):
+        self.k = k
+        self._vocabulary = vocabulary
+
+        if ohe_matrix is not None:
+            self.ohe_matrix = ohe_matrix
+            if wordle_list is not None:
+                self.ohe_matrix = self._sub_ohe(wordle_list)
+        else:
+            self.ohe_matrix = self._ohe()
+        
+        self._size = self.ohe_matrix.shape[0]
+    
+        if nn_output is not None:
+            if index is not None:
+                self._index = index
+                self._qfunc = (nn_output @ self.ohe_matrix).gather(1, index)
+            else:
+                self._qfunc, self._index = (nn_output @ self.ohe_matrix).max(1, keepdim=True)
+        elif index is not None:
+            self._index = index
+    
+    def _ohe(self):
+        n_wagons = ceil(5 / self.k)
+        unique_wagons = [list() for _ in range(n_wagons)]
+        for i, wagons in enumerate(unique_wagons):
+            for word in self.vocabulary:
+                wagon = word[i:i+self.k]
+                loc = bisect.bisect_left(wagons, wagon)
+                if len(wagons) <= loc or (wagons[loc] != wagon):
+                    wagons.insert(loc, wagon)
+            
+        lens = [len(wagons) for wagons in unique_wagons]
+
+        size = sum(lens)
+        self._size = size
+
+        res = torch.zeros((size, len(self.vocabulary)), device=DEVICE)
+
+        barriers = [0] + list(it.accumulate(lens))[:-1]
+
+        for i, word in enumerate(self.vocabulary):
+            for j, wagons in enumerate(unique_wagons):
+                wagon = word[j:j+self.k]
+                
+                loc = barriers[j] + bisect.bisect_left(wagons, wagon)
+                res[loc, i] = 1
+        
+        return res
+
+    def _init_dict(self):
+        return {
+            'k': self.k,
+            'ohe_matrix': self.ohe_matrix,
+            **super()._init_dict()
+        }
+
+    def _sub_ohe(self, wordle_list):
+        """
+        Select specific words from `ohe_matrix`. Used for solving subproblems.
+
+        Params
+        ------
+        wordle_list, Iterable[str]: full list of Wordle words
+        """
+        sub_indices = []
+        for word in self.vocabulary:
+            sub_indices.append(wordle_list.index(word))
+        
+        return self.ohe_matrix[:, torch.LongTensor(sub_indices)]
+
+
 # ======= EMBEDDING =======
 from annoy import AnnoyIndex
 from torch.utils.data import Dataset
 import torch.nn as nn
+from torch import LongTensor as LT
+from torch import FloatTensor as FT
+import torch as t
+from typing import Literal
+from math import perm
 
 import itertools as it
 from scipy.special import comb
@@ -312,7 +393,7 @@ class WordPairsDataset(Dataset):
         size = 0
         for i_letter in range(ord('a'), ord('z') + 1):
             count = np.count_nonzero(np.any(self.vocabulary == i_letter, axis=1))
-            size += comb(count, 2).astype(int)
+            size += int(perm(count, 2))
         
         self.size = size
         return self.size
@@ -338,125 +419,65 @@ class WordPairsDataset(Dataset):
             n_with_i_letter = np.nonzero(
                 np.any(self.vocabulary == i_letter, axis=1)
             )[0].astype(np.int64)
-            for i, j in it.combinations(n_with_i_letter, 2):
-                # first pair (2 * int_bytes)
+            for i, j in tqdm(it.permutations(n_with_i_letter, 2), desc='PERMUTS'):
                 output.write(int(i).to_bytes(self.int_bytes, byteorder='big'))
                 output.write(int(j).to_bytes(self.int_bytes, byteorder='big'))
             
 
 class Embedding(nn.Module):
-    """
-    Skip-gram model on pairs of Wordle words with shared letters.
-    """
-    def __init__(self, vocab_size=12972, emb_size=10):
+    def __init__(self, embedding_size, vocab_size, n_negs=5):
         super().__init__()
-        
+        self.n_negs = n_negs
         self.vocab_size = vocab_size
-        self.emb_size = emb_size
+        self.embedding_size = embedding_size
 
-        self.model = nn.Sequential(
-            nn.Embedding(self.vocab_size, self.emb_size),
-            nn.Linear(self.emb_size, self.vocab_size)
-        )
-    
-    def forward(self, x):
-        """x, torch.Tensor: OHE vector representing word in vocabulary."""
-        return self.model(x)
-    
-    def get_table(self):
-        """Retrieve embedding table."""
-        return self.model[0].weight.data.detach()
+        self.ivectors = nn.Embedding(self.vocab_size, self.embedding_size // 2)
+        self.ovectors = nn.Embedding(self.vocab_size, self.embedding_size // 2)
 
-    def train_epoch(self, dataloader, loss_fn, optimizer, device):
-        total_loss = 0.
+    def forward(self, iword, owords):
+        batch_size = iword.size()[0]
+
+        nwords = iword.new_empty(batch_size, self.n_negs, dtype=torch.float).uniform_(0, self.vocab_size-1).long()
+        ivectors = self.ivectors(iword).unsqueeze(2)
+        ovectors = self.ovectors(owords).unsqueeze(1)
+        nvectors = self.ovectors(nwords).neg()
+        oloss = t.bmm(ovectors, ivectors).squeeze().sigmoid().log()
+        nloss = t.bmm(nvectors, ivectors).squeeze().sigmoid().log().view(-1, self.n_negs).sum(1)
+        
+        return (oloss + nloss).mean().neg()
+    
+    def train_epoch(self, dataloader, optimizer, device):
+        total_loss = 0
         
         self.train()
         for batch in tqdm(dataloader, desc='TRAIN BATCHES'):
-            # send to device
-            inputs, targets = batch[0].to(device), batch[1].to(device)
-            
-            # forward pass
+        # for batch in dataloader:
+            iwords, owords = batch[0].to(device), batch[1].to(device)
             self.zero_grad()
-            outputs = self(inputs)
-            loss = loss_fn(outputs, targets)
-
-            # collect stats
+            loss = self.forward(iwords, owords)
             total_loss += loss.item()
-            
-            # compute gradients
             loss.backward()
-
-            # update net params
             optimizer.step()
         
         return total_loss / len(dataloader.dataset)
-
-class EmbeddingSmart(nn.Module):
-    """
-    Skip-gram model on pairs of Wordle words with shared letters. Scalar product version.
-    """
-    def __init__(self, vocab_size=12972, emb_size=10):
-        super().__init__()
-        
-        self.vocab_size = vocab_size
-        self.emb_size = emb_size
-
-        self.table = nn.Embedding(self.vocab_size, self.emb_size),
-    
-    def forward(self, x, y, is_negative):
-        """x, torch.Tensor: OHE vector representing word in vocabulary."""
-        # compute similarity between two embeddings
-        score = torch.sum(self.table(x) * self.table(y)) / torch.sqrt(self.emb_size)
-        
-        if is_negative:
-            score = score * (-1)
-
-        # retur probability of having similar word
-        return nn.functional.sigmoid(score)
     
     def get_table(self):
-        """Retrieve embedding table."""
-        return self.table.weight.data.detach()
-
-    def train_epoch_dot_product(self, dataloader, loss_fn, optimizer, device):
-        total_loss = 0.
-        
-        self.train()
-        for batch in tqdm(dataloader, desc='TRAIN BATCHES'):
-            # send to device
-            words_1, words_2 = batch[0].to(device), batch[1].to(device)
-            
-            # forward pass
-            self.zero_grad()
-            positive_probs = self(words_1, words_2, is_negative=False)
-            # === generate negative pairs and compute negative score ===
-            negative_probs = ...
-
-            # use custom loss function
-            loss = loss_fn(positive_probs, negative_probs)
-
-            # collect stats
-            total_loss += loss.item()
-            
-            # compute gradients
-            loss.backward()
-
-            # update net params
-            optimizer.step()
-        
-        return total_loss / len(dataloader.dataset)
+        return torch.cat([self.ivectors.weight, self.ovectors.weight], dim=1).detach()
 
 
 class ActionEmbedding(BaseAction):
     """Compatible only with ConvexQNetwork."""
-    def __init__(self, vocabulary, emb_size, indexer:AnnoyIndex=None, nn_output=None, index=None):
+    def __init__(
+            self, vocabulary, emb_size, indexer:AnnoyIndex=None, nn_output=None, index=None,
+            metric='euclidean', model_path='environment/embedding_model.pth'
+    ):
         self._vocabulary = vocabulary
         self._size = emb_size
         
         if indexer is not None:
             self.indexer = indexer
         else:
-            self.indexer = self._build_indexer()
+            self.indexer = self._build_indexer(metric, model_path)
 
         if nn_output is not None:
             self._qfunc, self.embedding = nn_output
@@ -501,11 +522,14 @@ class ActionEmbedding(BaseAction):
             res.append(self.indexer.get_item_vector(i))
         return torch.tensor(res)
     
-    def _build_indexer(self):
+    def _build_indexer(
+            self, metric: Literal['angular', 'euclidean', 'manhattan', 'hamming', 'dot'],
+            model_path
+    ):
         # load trained nn.Module and retrieve needed matrix
-        model = Embedding()
+        model = Embedding(self._size, len(self._vocabulary))
         model.load_state_dict(torch.load(
-            'environment/embedding_model.pth',
+            model_path,
             map_location=torch.device('cpu')
         ))
         embedding_table = model.get_table()
@@ -514,7 +538,7 @@ class ActionEmbedding(BaseAction):
         wordle_words = Wordle._load_vocabulary('wordle/guesses.txt', astype=list)
         
         # resulting indexer
-        res = AnnoyIndex(10, 'euclidean')
+        res = AnnoyIndex(self._size, metric)
         
         # for each word in current problem's vocabulary
         for i, word in enumerate(self.vocabulary):

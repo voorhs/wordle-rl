@@ -223,6 +223,8 @@ class Environment:
             if guess[i] not in self.collected[color]:
                 result += self.rewards[color]
                 self.collected[color].add(guess[i])
+            elif 'repeat' in self.rewards.keys() and color == 'G':
+                result += self.rewards['repeat']
         return result
 
     def reset(self, for_test=False):
