@@ -53,7 +53,6 @@ class RLFramework:
         self.n_episodes_warm = n_episodes_warm
         self.play_batch_size = play_batch_size
 
-
         if logging_interval is None:
             logging_interval = max(n_episodes // 8, 1)
         self.logging_interval = logging_interval
@@ -87,7 +86,9 @@ class RLFramework:
         # don't update net and 100% explore
         self.agent.eps = 1
         self.agent.eval = True
-        self.play_train(self.n_episodes_warm)
+        pbar = tqdm(total=self.n_episodes_warm, desc='WARM EPISODES')
+        self.play_train(self.n_episodes_warm, pbar=pbar)
+        pbar.close()
 
         # ======= TRAINING =======
 
@@ -117,57 +118,75 @@ class RLFramework:
     def save_checkpoint(self, i):
         self.agent.dump(self.nickname, i) 
 
-    def play_train(self, epoch_size, pbar=None, output=None):
-        # list of game states
+    def play_batch_parallel(self, output):
         envs_number = len(self.train_env_list)
+        
         state_size = self.train_env_list[0].state.size
         states = np.empty((envs_number, state_size))
-
-        # to store stats
-        scores = []
-        wins = []
-        start_time = time()
 
         # reset all environments
         for env in self.train_env_list:
             env.reset()
-            env.score = 0
+
+        # to store stats
+        batch_scores = np.zeros(envs_number)
+        batch_wins = np.zeros(envs_number, dtype=bool)
         
-        n_episodes_played = 0
-        
-        while n_episodes_played < epoch_size:
-            # collect batch of states from envs
+        all_is_over = False
+        while not all_is_over:
+            # collect batch of states from envs that are not finished yet
+            indexes = []
             for i, env in enumerate(self.train_env_list):
                 if env.game.isover():
-                    # collect stats
-                    if pbar is not None:
-                        pbar.update()
-                    n_episodes_played += 1
-                    scores.append(env.score)
-                    wins.append(env.game.iswin())
-                    # start new game
-                    env.reset()
-                    env.score = 0
+                    continue
 
                 states[i] = env.state.value
+                indexes.append(i)
             
             # feed batch to agent
-            actions = self.agent.act_batch(states)
+            actions = self.agent.act_batch(states[indexes])
 
-            for i, action in enumerate(actions):
+            all_is_over = True
+            for i, action in zip(indexes, actions):
                 # send action to env
                 next_state, reward, done = self.train_env_list[i].step(action, output)
-                
-                # collect stats
-                self.train_env_list[i].score += reward
 
                 # save replay to agent's buffer
                 self.agent.add(states[i], action, reward, next_state, done)
             
+                # collect stats
+                batch_scores[i] += reward
+
+                if done:
+                    batch_wins[i] = self.train_env_list[i].game.iswin()
+                else:
+                    all_is_over = False
+        
+        return batch_scores, batch_wins
+
+    def play_train(self, epoch_size, pbar=None, output=None):
+        n_batches = np.ceil(epoch_size / self.play_batch_size).astype(int)
+        scores = []
+        wins = []
+        start = time()
+        
+        for _ in range(n_batches):
+            batch_scores, batch_wins = self.play_batch_parallel(output)
+            
+            if pbar is not None:
+                pbar.update(self.play_batch_size)
+            
+            scores.append(batch_scores)
+            wins.append(batch_wins)
+
             # decrease exploration chance
             self.agent.eps = max(self.eps_end, self.eps_decay * self.agent.eps)
 
-        elapsed_time = time() - start_time
+        n_episodes_played = n_batches * self.play_batch_size
+        scores = np.concatenate(scores)
+        wins = np.concatenate(wins)
+        elapsed_time = time() - start
+
         return n_episodes_played, np.mean(scores), np.mean(wins), elapsed_time
 
     def play_test(self, output=None):
