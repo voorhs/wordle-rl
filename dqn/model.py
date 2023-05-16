@@ -6,85 +6,98 @@ import torch.nn.functional as F
 import torch.nn.utils.parametrize as P
 from collections import defaultdict
 from functools import partial
+from typing import Literal
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 class QNetwork(nn.Module):
-    """Actor (Policy) Model."""
-
-    def __init__(self, state_size, action_size, seed=None, hidden_size=256, n_hidden_layers=1, **kwargs):
-        """Initialize parameters and build model.
-        Params
-        ======
-            state_size (int): Dimension of each state
-            action_size (int): Dimension of each action
-            seed (int): Random seed
-        """
+    def __init__(
+            self, state_size, action_size, seed=None, hidden_size=256,
+            n_hidden_layers=1, skip=True, combine_method: Literal['sum', 'concat'] = 'sum', **kwargs):
         super().__init__()
         if seed is not None:
             self.seed = torch.manual_seed(seed)
         
+        self.state_size = state_size
+        self.action_size = action_size
+        self.hidden_size = hidden_size
+        self.n_hidden_layers = n_hidden_layers
+        self.skip = skip
+        self.combine_method = combine_method
+        
         layers = [nn.Linear(state_size, hidden_size)]
         for _ in range(n_hidden_layers):
             layers.append(nn.Linear(hidden_size, hidden_size))
+        
         self.layers = nn.ModuleList(layers)
         self.output = nn.Linear(hidden_size, action_size)
 
+        forward = self._forward_mlp
+        if self.skip:
+            if self.combine_method == 'sum':
+                forward = self._forward_skip_sum
+            elif self.combine_method == 'concat':
+                forward = self._forward_skip_concat
+        
+        self._forward = forward
+
     def forward(self, x):
+        return self._forward(x)
+
+    def _forward_mlp(self, x):
+        """Default multilayer perceptron."""
         for fc in self.layers:
             x = F.relu(fc(x))
         
         return self.output(x)
     
-    def freeze(self):
-        self.layers[0].requires_grad_(False)
-        self.layers[1].requires_grad_(False)
+    def _forward_skip_sum(self, x):
+        """ResNet-like skip-connections."""
+        # first two activations
+        y = F.relu(self.layers[0](x))
+        z = F.relu(self.layers[1](y))
+        x = [y, z]
 
-
-class BackboneQNetwork(nn.Module):
-    def __init__(self, state_size, action_size, seed=0, **kwargs):
-        """Initialize parameters and build model.
-        Params
-        ======
-            state_size (int): Dimension of each state
-            action_size (int): Dimension of each action
-            seed (int): Random seed
-        """
-        super().__init__()
-        self.seed = torch.manual_seed(seed)
+        # the rest of activations
+        for fc in self.layers[2:]:
+            x.append(F.relu(fc(x[-2] + x[-1])))
         
-        self.fc1 = nn.Linear(state_size, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, action_size)
+        return self.output(x[-2] + x[-1])
 
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        
-        return self.fc3(x)
+    def _forward_skip_concat(self, x):
+        """DenseNet-like skip-connections."""
+        prev_features = [x]
 
+        for fc in self.layers[1:]:
+            cur_features = torch.cat(prev_features, dim=1) 
+            x = F.relu(fc(cur_features))
+            prev_features.append(x)
 
-class SkipConnectionQNetwork(BackboneQNetwork):
-    def forward(self, x):
-        y = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(y))
-        
-        return self.fc3(x+y)
+        cur_features = torch.cat(prev_features, dim=1) 
+        return self.output(cur_features)
     
-    def freeze(self):
-        self.fc1.requires_grad_(False)
-        self.fc2.requires_grad_(False)
-    
+    def fine_tune(self, layers_ind=None):
+        if layers_ind is None:
+            layers_ind = range(self.n_hidden_layers+1)
+        for i in layers_ind:
+            self.layers[i].requires_grad_(False)
 
-class StackingOverBackbone(nn.Module):
-    def __init__(self, state_size, action_size, seed=0, **kwargs):
-        super().__init__()
-        self.seed = torch.manual_seed(seed)
-        
-        # skip connection anywhere?
-        self.fc1 = nn.Linear(state_size, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 130)
-        self.fc4 = nn.Linear(130, action_size)
+    def load_backbone(self, path, layers_ind=None):
+        backbone = QNetwork(
+            self.state_size, self.action_size, self.seed,
+            self.hidden_size, self.n_hidden_layers, self.skip
+        ).float().to(DEVICE)
+
+        backbone.load_state_dict(torch.load(path, map_location=DEVICE))
+
+        if layers_ind is None:
+            layers_ind = range(self.n_hidden_layers+1)
+
+        for i in layers_ind:
+            self.layers[i].load_state_dict(backbone.layers[i].state_dict())
+
+
+# ======= CONVEX SOLUTION (FAILED YET) ======= 
 
 
 class ConvexQNetwork(nn.Module):

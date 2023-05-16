@@ -1,5 +1,5 @@
 from typing import List
-from wordle.wordlenp import Wordle
+from wordle.wordle import Wordle
 import numpy as np
 import torch
 import itertools as it
@@ -67,47 +67,56 @@ class BaseAction:
         return self
     
     def __next__(self):
-        """Used to split batched Action object to single ones."""
+        """
+        Used to split batched Action object to single ones.
+        Copies only inheritant-specific attributes and sets the index of word.
+        """
         self._iter_current += 1
         if self._iter_current < len(self.index):
-            return type(self)(
-                index=self.index[self._iter_current].cpu().item(),
+            res = type(self)(
                 **self._init_dict()
             )
+            res.set_index(self.index[self._iter_current].cpu().item())
+            return res
         raise StopIteration()
+    
+    def set_index(self, index):
+        """For unbatching via __next__"""
+        self._index = index
 
     def __call__(self, nn_output, **kwargs):
         """Fabric."""
-        return type(self)(
-            nn_output=nn_output,
+        res = type(self)(
             **kwargs,
             **self._init_dict()
         )
+        res.feed_nn_output(nn_output)
+        return res
+    
+    def feed_nn_output(self, nn_output):
+        """For fabric via __call__"""
+        raise NotImplementedError()
+
+    def qfunc_of_action(self, nn_output, index):
+        """For retrieving qfunc for qlocal in agent.learn()"""
+        raise NotImplementedError()
 
 
 class ActionVocabulary(BaseAction):
     """Action is an index of word in list of possible answers."""
 
-    def __init__(self, nn_output:torch.Tensor=None, vocabulary=None, index=None):
-        """
-        Params
-        ------
-        nn_output (torch.tensor): shape (batch_size, action_size)
-        vocabulary (List[str]): list of all valid guesses
-        """
-        if nn_output is not None:
-            if index is not None:
-                # in case of retrieving qfunc for q_local
-                self._index = index
-                self._qfunc = nn_output.gather(1, index)
-            else:
-                # in case of fabric via __call__
-                self._qfunc, self._index = nn_output.max(1, keepdim=True)
-        elif index is not None:
-            # in case of unbatching via __next__
-            self._index = index
-        
+    def __init__(self, vocabulary: List[str]):
+        if not isinstance(vocabulary, list):
+            raise ValueError('`vocabulary` arg must be a list')
         self._vocabulary = vocabulary
+
+    def feed_nn_output(self, nn_output):
+        self._qfunc, self._index = nn_output.max(1, keepdim=True)
+    
+    def qfunc_of_action(self, nn_output, index):
+        self._index = index
+        self._qfunc = nn_output.gather(1, index)
+        return self._qfunc
 
     @property
     def size(self):
@@ -118,41 +127,36 @@ class ActionVocabulary(BaseAction):
 class ActionLetters(BaseAction):
     """Action is to choose letter for each position"""
 
-    def __init__(self, vocabulary, nn_output:torch.Tensor=None, index=None, ohe_matrix=None, wordle_list=None):
+    def __init__(self, vocabulary: list, ohe_matrix, wordle_list=None, aug_words=None):
         """
         Params
         ------
-        nn_output (torch.tensor): shape (batch_size, action_size)
         vocabulary (List[str]): list of all valid guesses
         ohe_matrix (torch.tensor): shape (130, len(vocabulary)),
             matrix with letter-wise OHEs for each word in vocabulary
+        wordle_list (Iterable[str]): full list of Wordle words
         """
+        # validate input
+        if not isinstance(vocabulary, list):
+            raise ValueError(f'`vocabulary` arg must be a list, but given {type(vocabulary)}')
+        
         self._vocabulary = vocabulary
-
-        if ohe_matrix is not None:
-            self.ohe_matrix = ohe_matrix
-            if wordle_list is not None:
-                self.ohe_matrix = self._sub_ohe(wordle_list)
-        else:    
-            # W[i, j*26+k] = vocabulary[i][j] == 65+k,
-            # i.e. indicates that jth letter of ith word is kth letter of alphabet
-            self.ohe_matrix = self._ohe()
-
+        self.ohe_matrix = ohe_matrix
+        if aug_words is not None:
+            wordle_list = wordle_list + aug_words
+            self.ohe_matrix = torch.cat([self.ohe_matrix, ActionLetters._make_ohe(aug_words)], dim=1)
+        if wordle_list is not None:
+            self.ohe_matrix = ActionLetters._sub_ohe(self._vocabulary, self.ohe_matrix, wordle_list)
         self._size = self.ohe_matrix.shape[0]
-    
-        if nn_output is not None:
-            if index is not None:
-                self._index = index
-                self._qfunc = (nn_output @ self.ohe_matrix).gather(1, index)
-            else:
-                self._qfunc, self._index = (nn_output @ self.ohe_matrix).max(1, keepdim=True)
-        elif index is not None:
-            self._index = index
    
-    def _ohe(self):
-        res = torch.zeros((26 * 5, len(self.vocabulary)), device=DEVICE)
+    def _make_ohe(vocabulary):
+        """
+        W[i, j*26+k] = vocabulary[i][j] == 65+k, i.e. indicates that
+        jth letter of ith word is kth letter of alphabet
+        """
+        res = torch.zeros((26 * 5, len(vocabulary)), device=DEVICE)
             
-        for i, word in enumerate(self.vocabulary):
+        for i, word in enumerate(vocabulary):
             for j, c in enumerate(word):
                 res[j*26+(ord(c)-97), i] = 1
         
@@ -164,7 +168,7 @@ class ActionLetters(BaseAction):
             **super()._init_dict()
         }
 
-    def _sub_ohe(self, wordle_list):
+    def _sub_ohe(vocabulary, ohe_matrix, wordle_list):
         """
         Select specific words from `ohe_matrix`. Used for solving subproblems.
 
@@ -173,51 +177,41 @@ class ActionLetters(BaseAction):
         wordle_list, Iterable[str]: full list of Wordle words
         """
         sub_indices = []
-        for word in self.vocabulary:
+        for word in vocabulary:
             sub_indices.append(wordle_list.index(word))
         
-        return self.ohe_matrix[:, torch.LongTensor(sub_indices)]
+        return ohe_matrix[:, torch.LongTensor(sub_indices)]
 
+    def feed_nn_output(self, nn_output):
+        self._qfunc, self._index = (nn_output @ self.ohe_matrix).max(1, keepdim=True)
 
-class ActionCombLetters(BaseAction):
-    def __init__(self, vocabulary, nn_output=None, index=None, ohe_matrix=None, k=1, wordle_list=None):
+    def qfunc_of_action(self, nn_output, index):
+        self._index = index
+        self._qfunc = (nn_output @ self.ohe_matrix).gather(1, index)
+        return self._qfunc
+    
+
+class ActionCombLetters(ActionLetters):
+    def __init__(self, vocabulary, ohe_matrix, k, wordle_list=None):
         self.k = k
-        self._vocabulary = vocabulary
-
-        if ohe_matrix is not None:
-            self.ohe_matrix = ohe_matrix
-            if wordle_list is not None:
-                self.ohe_matrix = self._sub_ohe(wordle_list)
-        else:
-            self.ohe_matrix = self._ohe()
-        
-        self._size = self.ohe_matrix.shape[0]
+        super().__init__(vocabulary=vocabulary, ohe_matrix=ohe_matrix, wordle_list=wordle_list)
     
-        if nn_output is not None:
-            if index is not None:
-                self._index = index
-                self._qfunc = (nn_output @ self.ohe_matrix).gather(1, index)
-            else:
-                self._qfunc, self._index = (nn_output @ self.ohe_matrix).max(1, keepdim=True)
-        elif index is not None:
-            self._index = index
-    
-    def _ohe(self):
+    def _make_ohe(vocabulary, k):
         # list of OHEs for all k
         res = []
-        self._size = 0
+        n_letters = len(vocabulary[0])
 
-        for k in range(1, self.k+1):
+        for k in range(1, k+1):
             # `combs` is a list of k-lengthed tuples with indexes
             # corresponding to combination of letters in word
-            combs = list(it.combinations(range(5), k))
+            combs = list(it.combinations(range(n_letters), k))
             n_combs = len(combs)
 
             # let's find out all unique combinations w.r.t. their positions
             # i.e. all unique pairs of (1st,3rd), (4th,5th) etc.
             unique_combs = [list() for _ in range(n_combs)]
             
-            for word in self.vocabulary:
+            for word in vocabulary:
                 for i, inds in enumerate(combs):
                     comb = ''.join([word[j] for j in inds])
                     # keep it sorted to encode quicker then
@@ -230,15 +224,14 @@ class ActionCombLetters(BaseAction):
             # in worst case total_length is (5 choose k) * 26^k
             # which is 6760 for k=2
             size = sum(lens)
-            self._size += size
 
             # to store result
-            tmp_res = torch.zeros((size, len(self.vocabulary)), device=DEVICE)
+            tmp_res = torch.zeros((size, len(vocabulary)), device=DEVICE)
             
             # these barriers split OHE-vector to `n_combs` parts
             barriers = [0] + list(it.accumulate(lens))[:-1]
 
-            for i, word in enumerate(self.vocabulary):
+            for i, word in enumerate(vocabulary):
                 for j, inds in enumerate(combs):
                     comb = ''.join([word[m] for m in inds])
                     
@@ -253,96 +246,38 @@ class ActionCombLetters(BaseAction):
     def _init_dict(self):
         return {
             'k': self.k,
-            'ohe_matrix': self.ohe_matrix,
             **super()._init_dict()
         }
 
-    def _sub_ohe(self, wordle_list):
-        """
-        Select specific words from `ohe_matrix`. Used for solving subproblems.
-
-        Params
-        ------
-        wordle_list, Iterable[str]: full list of Wordle words
-        """
-        sub_indices = []
-        for word in self.vocabulary:
-            sub_indices.append(wordle_list.index(word))
+class ActionWagons(ActionCombLetters):
+    def _make_ohe(vocabulary, k):
+        n_letters = len(vocabulary[0])
+        n_wagons = ceil(n_letters / k)
         
-        return self.ohe_matrix[:, torch.LongTensor(sub_indices)]
-
-
-class ActionWagons(ActionLetters):
-    def __init__(self, vocabulary, nn_output=None, index=None, ohe_matrix=None, k=2, wordle_list=None):
-        self.k = k
-        self._vocabulary = vocabulary
-
-        if ohe_matrix is not None:
-            self.ohe_matrix = ohe_matrix
-            if wordle_list is not None:
-                self.ohe_matrix = self._sub_ohe(wordle_list)
-        else:
-            self.ohe_matrix = self._ohe()
-        
-        self._size = self.ohe_matrix.shape[0]
-    
-        if nn_output is not None:
-            if index is not None:
-                self._index = index
-                self._qfunc = (nn_output @ self.ohe_matrix).gather(1, index)
-            else:
-                self._qfunc, self._index = (nn_output @ self.ohe_matrix).max(1, keepdim=True)
-        elif index is not None:
-            self._index = index
-    
-    def _ohe(self):
-        n_wagons = ceil(5 / self.k)
         unique_wagons = [list() for _ in range(n_wagons)]
+
         for i, wagons in enumerate(unique_wagons):
-            for word in self.vocabulary:
-                wagon = word[i:i+self.k]
+            for word in vocabulary:
+                wagon = word[i:i+k]
                 loc = bisect.bisect_left(wagons, wagon)
                 if len(wagons) <= loc or (wagons[loc] != wagon):
                     wagons.insert(loc, wagon)
             
         lens = [len(wagons) for wagons in unique_wagons]
-
         size = sum(lens)
-        self._size = size
 
-        res = torch.zeros((size, len(self.vocabulary)), device=DEVICE)
+        res = torch.zeros((size, len(vocabulary)), device=DEVICE)
 
         barriers = [0] + list(it.accumulate(lens))[:-1]
 
-        for i, word in enumerate(self.vocabulary):
+        for i, word in enumerate(vocabulary):
             for j, wagons in enumerate(unique_wagons):
-                wagon = word[j:j+self.k]
+                wagon = word[j:j+k]
                 
                 loc = barriers[j] + bisect.bisect_left(wagons, wagon)
                 res[loc, i] = 1
         
         return res
-
-    def _init_dict(self):
-        return {
-            'k': self.k,
-            'ohe_matrix': self.ohe_matrix,
-            **super()._init_dict()
-        }
-
-    def _sub_ohe(self, wordle_list):
-        """
-        Select specific words from `ohe_matrix`. Used for solving subproblems.
-
-        Params
-        ------
-        wordle_list, Iterable[str]: full list of Wordle words
-        """
-        sub_indices = []
-        for word in self.vocabulary:
-            sub_indices.append(wordle_list.index(word))
-        
-        return self.ohe_matrix[:, torch.LongTensor(sub_indices)]
 
 
 # ======= EMBEDDING =======
@@ -465,6 +400,7 @@ class Embedding(nn.Module):
         return torch.cat([self.ivectors.weight, self.ovectors.weight], dim=1).detach()
 
 
+# in develop (critical update missing)
 class ActionEmbedding(BaseAction):
     """Compatible only with ConvexQNetwork."""
     def __init__(

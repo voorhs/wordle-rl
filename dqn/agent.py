@@ -5,9 +5,9 @@ import random
 from functools import partial
 from typing import List, Union
 
-from dqn.model import QNetwork, BackboneQNetwork
 from environment.environment import BaseState
 from environment.action import BaseAction, ActionEmbedding
+from dqn.model import QNetwork
 
 import torch
 import torch.nn as nn
@@ -217,7 +217,7 @@ class Agent():
         self.qnetwork_local.train()
         if not isinstance(self.action, ActionEmbedding):
             nn_output = self.qnetwork_local(batch['state'])
-            q_local = self.action(nn_output, index=batch['action'].long()).qfunc
+            q_local = self.action.qfunc_of_action(nn_output, index=batch['action'].long())
         else:
             embeddings = self.action.get_embeddings(batch['action'].long())
             q_local, _ = self.qnetwork_local(batch['state'], embeddings)
@@ -273,20 +273,9 @@ class Agent():
         return agent_path
     
     def load_backbone(self, model_path):
-        # local network
-        backbone_local = BackboneQNetwork(self.state_size, 130).float().to(self.device)
-        backbone_local.load_state_dict(torch.load(model_path))
+        self.qnetwork_local.load_backbone(model_path)
+        self.qnetwork_target.load_backbone(model_path)
 
-        self.qnetwork_local.layers[0].load_state_dict(backbone_local.fc1.state_dict())
-        self.qnetwork_local.layers[1].load_state_dict(backbone_local.fc2.state_dict())
-        
-        # target network
-        backbone_target = BackboneQNetwork(self.state_size, 130).float().to(self.device)
-        backbone_target.load_state_dict(torch.load(model_path))
-        
-        self.qnetwork_target.layers[0].load_state_dict(backbone_target.fc1.state_dict())
-        self.qnetwork_target.layers[1].load_state_dict(backbone_target.fc2.state_dict())
-
-    def freeze_layers(self):
-        self.qnetwork_local.freeze()
-        self.qnetwork_target.freeze()
+    def fine_tune(self):
+        self.qnetwork_local.fine_tune()
+        self.qnetwork_target.fine_tune()
