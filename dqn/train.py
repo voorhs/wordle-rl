@@ -2,9 +2,10 @@
 
 import torch
 import numpy as np
+import pandas as pd
 
-from tqdm.notebook import tqdm_notebook as tqdm
-from collections import deque
+from tqdm.notebook import tqdm
+from collections import deque, defaultdict
 from functools import partial
 from time import time
 from datetime import datetime
@@ -16,7 +17,7 @@ from environment.action import ActionWagons, ActionVocabulary, ActionLetters, Ac
 from wordle.wordle import Wordle, Dordle
 from replay_buffer.cpprb import ReplayBuffer, PrioritizedReplayBuffer
 from dqn.agent import Agent
-from dqn.model import QNetwork
+from dqn.model import QNetwork, OldQNetwork
 
 
 class RLFramework:
@@ -27,6 +28,7 @@ class RLFramework:
             train_env: List[Environment],
             test_word_list: List[str],
             nickname,
+            detailed_logging=False,
             logging_interval=None,
             n_episodes=80000,
             n_episodes_warm=80,
@@ -53,6 +55,7 @@ class RLFramework:
         self.n_episodes_warm = n_episodes_warm
         self.play_batch_size = play_batch_size
 
+        self.detailed_logging = detailed_logging
         if logging_interval is None:
             logging_interval = max(n_episodes // 8, 1)
         self.logging_interval = logging_interval
@@ -75,7 +78,6 @@ class RLFramework:
         self.eps_end = eps_end
 
     def train(self):
-        """Requires params to define exploration during training"""
         # duplicate std output to file
         self.logs_output = f'{self.nickname}/logs.txt'
         self.n_episodes_played = 0
@@ -127,6 +129,7 @@ class RLFramework:
         # reset all environments
         for env in self.train_env_list:
             env.reset()
+            env.disable_reward_logs()
 
         # to store stats
         batch_scores = np.zeros(envs_number)
@@ -166,6 +169,9 @@ class RLFramework:
 
     def play_train(self, epoch_size, pbar=None, output=None):
         n_batches = np.ceil(epoch_size / self.play_batch_size).astype(int)
+        if n_batches == 0:
+            return
+        
         scores = []
         wins = []
         start = time()
@@ -187,7 +193,7 @@ class RLFramework:
         wins = np.concatenate(wins)
         elapsed_time = time() - start
 
-        return n_episodes_played, np.mean(scores), np.mean(wins), elapsed_time
+        return n_episodes_played, scores, wins, elapsed_time
 
     def play_test(self, output=None):
         # test agent without exploration
@@ -208,6 +214,7 @@ class RLFramework:
         n_words_guessed = 0
         for env in self.train_env_list:
             env.reset(self.test_word_list[n_words_guessed])
+            env.enable_reward_logs()
             n_words_guessed += 1
             env.score = 0
             env.steps = 0
@@ -255,44 +262,139 @@ class RLFramework:
                     i_word += 1
         
         self.agent.eps = eps
-        return np.mean(scores), wins, np.mean(steps)
+        return scores, wins, steps
 
     def log(self, train_stats, test_stats, game_output):
-        n_episodes_played, _, train_win_rate, elapsed_time = train_stats
-        test_score, test_wins, test_mean_steps = test_stats
+        # collected stats
+        n_episodes_played, train_scores, train_wins, elapsed_time = train_stats
+        test_scores, test_wins, test_steps = test_stats
+
+        # simple aggregations
+        train_win_rate = 100 * np.mean(train_wins)
+        test_win_rate = 100 * np.mean(test_wins)
+        test_mean_steps = np.mean(test_steps)
+        test_mean_score = np.mean(test_scores)
+
+        if self.detailed_logging:
+            # top 3 hardest and easiest words
+            hard_inds = np.argpartition(self.train_env_list[0].game.loses, kth=range(-3, 0))[range(-3, 0)]
+            easy_inds = np.argpartition(self.train_env_list[0].game.wins, kth=range(-3, 0))[range(-3, 0)]
+            hard_words = [self.test_word_list[i] for i in hard_inds]
+            easy_words = [self.test_word_list[i] for i in easy_inds]
+
+            # distribution of games by number of steps made
+            n_letters = self.train_env_list[0].game.n_letters
+            test_steps_distribution = np.bincount(test_steps, minlength=n_letters+1)[1:]
+            tsd = ', '.join([f'({i}) {val}' for i, val in enumerate(test_steps_distribution, start=1)])
+            
+            # distribution of games by total reward gained
+            test_reward_distribution = np.histogram(test_scores, bins=10)
+            counts, bins = test_reward_distribution
+            trd = ', '.join([f'[{bins[i]:.1f},{bins[i+1]:.1f}): {val}' for i, val in enumerate(counts)])
+
+        # will be returned in the end of training
+        def to_txt(txt, string):
+            open(f'{self.nickname}/{txt}', 'a+').write(str(string)+',')
+        to_txt('train_scores.txt', ','.join([str(a) for a in train_scores]))
+        to_txt('train_win_rates.txt', train_win_rate)
+        to_txt('test_mean_scores.txt', test_mean_score)
+        to_txt('test_win_rates.txt', test_win_rate)
+        
+        # rewards distribution
+        trtd = self.flush_reward_logs()
 
         self.n_episodes_played += n_episodes_played
         self.elapsed_time += elapsed_time
 
+        # to train logs
         message = '\t'.join([
             f'\nEpisodes: {self.n_episodes_played:4d}',
             f'Time: {self.elapsed_time:.0f} s',
             f'Agent Eps: {self.agent.eps:.2f}',
-            f'Train Win Rate: {100*train_win_rate:.2f}%',
-            f'Test Win Rate: {100*np.mean(test_wins):.2f}%',
+            f'Train Win Rate: {train_win_rate:.2f}%',
+            f'Test Win Rate: {test_win_rate:.2f}%',
             f'Test Mean Steps: {test_mean_steps:.4f}',
         ])
+        if self.detailed_logging:
+            message += '\n\n' + '\t'.join([
+                f'Hard Words: {", ".join(hard_words)}',
+                f'Easy Words: {", ".join(easy_words)}',
+            ]) + '\n' + '\n'.join([
+                f'Test Games Distribution by Steps: {tsd}',
+                f'Test Games Distribution by Reward: {trd}',
+                f'Test Rewards Contributions: {trtd}'
+            ])
         self.print(message, self.logs_output)
 
-        # add to end of game report
+        # to game report
         message = '\n'.join([
-                f'Test Win Rate: {sum(test_wins)} / {len(test_wins)} ({100*np.mean(test_wins):.2f}%)',
+                f'Test Win Rate: {sum(test_wins)} / {len(test_wins)} ({test_win_rate:.2f}%)',
                 f'Test Mean Steps: {test_mean_steps:.4f}',
-                f'Test Score: {test_score}'
         ])
+        if self.detailed_logging:
+            message += '\n' + '\n'.join([
+                f'Hard Words: {", ".join(hard_words)}',
+                f'Easy Words: {", ".join(easy_words)}',
+                f'Test Games Distribution by Steps: {tsd}',
+                f'Test Games Distribution by Reward: {trd}',
+                f'Test Rewards Contributions: {trtd}'
+            ])
         open(game_output, 'a+').write(message + '\n')
+
+    def flush_reward_logs(self):
+        # collate dicts from all environments
+        collated = defaultdict(int)
+        total = 0
+        for env in self.train_env_list:
+            for key, val in env.reward_stats.items():
+                collated[key] += val
+                total += val
+        
+        # clear all reward stats
+        for env in self.train_env_list:
+            for key in env.reward_stats.keys():
+                env.reward_stats[key] = 0
+
+        # compute fraction of each reward type
+        res = {}
+        for key, val in collated.items():
+            res[key] = val / total
+
+        return ', '.join([f'{key}: {100*val:.2f}%' for key, val in res.items()])
 
     def print(self, message, output):
         print(message)
         open(output, 'a+').write(message + '\n')
 
     def test_initial(self):
-        _, test_wins, test_mean_steps = self.play_test()
+        # collected stats
+        test_scores, test_wins, test_steps = self.play_test(f'{self.nickname}/test-initial.txt')
+        
+        # simple aggregations
+        test_win_rate = 100 * np.mean(test_wins)
+        test_mean_steps = np.mean(test_steps)
+
+        # distribution of games by number of steps made
+        n_letters = self.train_env_list[0].game.n_letters
+        test_steps_distribution = np.bincount(test_steps, minlength=n_letters+1)[1:]
+        tsd = ', '.join([f'{i}: {val}' for i, val in enumerate(test_steps_distribution, start=1)])
+        
+        # distribution of games by total reward gained
+        test_reward_distribution = np.histogram(test_scores, bins=10)
+        counts, bins = test_reward_distribution
+        trd = ', '.join([f'[{bins[i]:.1f},{bins[i+1]:.1f}): {val}' for i, val in enumerate(counts)])
+
+        # rewards distribution
+        trtd = self.flush_reward_logs()
 
         message = '\t'.join([
-            f'Initial Test. ',
-            f'Win Rate: {100*np.mean(test_wins):.2f}%',
-            f'Mean Steps: {test_mean_steps:.4f}',
+            f'Initial Stats. ',
+            f'Test Win Rate: {test_win_rate:.2f}%',
+            f'Test Mean Steps: {test_mean_steps:.4f}',
+        ]) + '\n\n' + '\n'.join([
+            f'Test Games Distribution by Steps: {tsd}',
+            f'Test Games Distribution by Reward: {trd}',
+            f'Test Rewards Distribution by Type: {trtd}'
         ])
 
         # print train stats
@@ -303,13 +405,13 @@ def exp_with_action(
     action_type: Literal['vocabulary', 'letters', 'comb_letters', 'wagons'],
     rewards,
     eps_start, eps_end, eps_decay, rb_size=int(1e6), n_letters=5, n_steps=6,
-    lr=5e-4, alpha=0, negative_weights=False, positive_weights=False,
+    lr=5e-4, combine_method='concat', hidden_size=256, n_hidden_layers=1, alpha=0, negative_weights=False, positive_weights=False,
     logging_interval=None, fine_tune=False, backbone_path=None, *, method_name,
     data, n_envs, optimize_interval, agent_path, n_episodes, n_episodes_warm, **action_specs
 ):
     """(Non-generic) experiment configurations. Operates with RLFramework."""
 
-    train_answers, test_answers, guesses_set, aug_words = data
+    train_answers, test_answers, guesses_set = data
     guesses_list = list(guesses_set)
     
     # create train list of parallel games 
@@ -327,16 +429,11 @@ def exp_with_action(
         train_env_list.append(env)
     state_size = train_env_list[0].state.size
 
-    # synchronize weight pointers of all env instances
-    if positive_weights:
-        for env in train_env_list[1:]:
-            env.wordle.positive_weights = train_env_list[0].wordle.positive_weights
-    
-    if negative_weights:
-        for env in train_env_list[1:]:
-            env.wordle.negative_weights = train_env_list[0].wordle.negative_weights
+    # synchronize pointers of all env instances
+    for env in train_env_list[1:]:
+        env.game.wins = train_env_list[0].game.wins
+        env.game.loses = train_env_list[0].game.loses
 
-    replay_buffer = None
     if alpha == 0:
         replay_buffer = ReplayBuffer(state_size=state_size, buffer_size=rb_size)
     else:
@@ -351,7 +448,6 @@ def exp_with_action(
             vocabulary=guesses_list,
             ohe_matrix=action_specs['ohe_matrix'],
             wordle_list=action_specs['wordle_list'],
-            aug_words=aug_words
         )
     elif action_type == 'comb_letters':
         action = ActionCombLetters(
@@ -376,7 +472,10 @@ def exp_with_action(
         optimize_interval=optimize_interval,
         agent_path=agent_path,
         lr=lr,
-        model=QNetwork
+        model=OldQNetwork,
+        combine_method=combine_method,
+        hidden_size=hidden_size,
+        n_hidden_layers=n_hidden_layers
     )
 
     if fine_tune:
@@ -410,7 +509,7 @@ def exp_with_action(
     
     return exp.nickname
 
-def train_test_split(n_guesses, overfit, guesses, indices, in_answers, augment_prob_word=None, augment_prob_letter=None):
+def train_test_split(n_guesses, overfit, guesses, indices, in_answers):
     guesses = np.array(guesses)
     guesses_cur = guesses[indices[:n_guesses]]
     
@@ -427,35 +526,17 @@ def train_test_split(n_guesses, overfit, guesses, indices, in_answers, augment_p
     else:
         train_answers_cur = guesses[train_indices]
     
-    aug_words = []
-    if augment_prob_word is not None:
-        np.random.seed(0)
-        word_events = np.random.uniform(0,1, size=len(train_answers_cur))
-        for j, word in enumerate(train_answers_cur):
-            if word_events[j] > augment_prob_word:
-                continue
-            word = list(str(word))
-            letter_events = np.random.uniform(0,1, size=len(word))
-            for i in range(len(word)):
-                if letter_events[i] < augment_prob_letter:
-                    word[i] = chr(np.random.randint(low=ord('a'), high=ord('z')+1))
-            word = ''.join(word)
-            if word not in guesses_cur:
-                aug_words.append(word)
-        train_answers_cur = np.concatenate([train_answers_cur, np.array(aug_words)])
-        guesses_cur = np.concatenate([guesses_cur, np.array(aug_words)])
-    
     test_answers_cur = guesses[test_indices]
 
     print(
         f'guesses: {len(guesses_cur)}',
         f'train answers: {len(train_answers_cur)}',
         f'test answers: {len(test_answers_cur)}' + (' (overfit strategy)' if overfit else ''),
-        f'augmented: {len(aug_words)}',
         sep='\n'
     )
 
-    return list(train_answers_cur), list(test_answers_cur), set(guesses_cur), aug_words
+    return list(train_answers_cur), list(test_answers_cur), set(guesses_cur)
+
 
 def get_dordle_data(n_guesses, n_boards, guesses, indices, in_answers):
     np.random.seed(0)

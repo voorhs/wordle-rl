@@ -127,7 +127,7 @@ class ActionVocabulary(BaseAction):
 class ActionLetters(BaseAction):
     """Action is to choose letter for each position"""
 
-    def __init__(self, vocabulary: list, ohe_matrix, wordle_list=None, aug_words=None):
+    def __init__(self, vocabulary: list, ohe_matrix, wordle_list=None):
         """
         Params
         ------
@@ -142,19 +142,16 @@ class ActionLetters(BaseAction):
         
         self._vocabulary = vocabulary
         self.ohe_matrix = ohe_matrix
-        if aug_words is not None:
-            wordle_list = wordle_list + aug_words
-            self.ohe_matrix = torch.cat([self.ohe_matrix, ActionLetters._make_ohe(aug_words)], dim=1)
         if wordle_list is not None:
             self.ohe_matrix = ActionLetters._sub_ohe(self._vocabulary, self.ohe_matrix, wordle_list)
         self._size = self.ohe_matrix.shape[0]
    
-    def _make_ohe(vocabulary):
+    def _make_ohe(vocabulary, n_letters=5):
         """
         W[i, j*26+k] = vocabulary[i][j] == 65+k, i.e. indicates that
         jth letter of ith word is kth letter of alphabet
         """
-        res = torch.zeros((26 * 5, len(vocabulary)), device=DEVICE)
+        res = torch.zeros((26 * n_letters, len(vocabulary)), device=DEVICE)
             
         for i, word in enumerate(vocabulary):
             for j, c in enumerate(word):

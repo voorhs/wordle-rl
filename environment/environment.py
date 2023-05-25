@@ -248,6 +248,9 @@ class Environment:
         # it's better to remember letters
         self.collected = {color: set() for color in ['B', 'Y', 'G']}
 
+        # for collecting stats
+        self.reward_stats = {key: 0 for key in self.rewards.keys()}
+
     def step(self, action: BaseAction, output):
         # convert action to str guess
         guess = action.word
@@ -263,7 +266,39 @@ class Environment:
 
         return self.state.copy(), reward, self.game.isover()
 
-    def _reward(self, guess, pattern):
+    def disable_reward_logs(self):
+        self._reward = self._reward_logs_off
+    
+    def enable_reward_logs(self):
+        self._reward = self._reward_logs_on
+
+    def _reward_logs_on(self, guess, pattern):
+        # to save result
+        result = 0
+
+        def assign_reward(key):
+            rew = self.rewards[key] 
+            self.reward_stats[key] += abs(rew)
+            return rew
+
+        # reward (supposed to be negative) for any guess
+        result += assign_reward('step')
+
+        # reward for each letter
+        for i, color in enumerate(pattern):
+            if guess[i] not in self.collected[color]:
+                result += assign_reward(color)
+                self.collected[color].add(guess[i])
+            elif 'repeat' in self.rewards.keys() and color == 'G':
+                result += assign_reward('repeat')
+        
+        # if end of episode
+        if self.game.isover():
+            result += assign_reward('win' if self.game.iswin() else 'lose')
+        
+        return result
+
+    def _reward_logs_off(self, guess, pattern):
         # reward (supposed to be negative) for any guess
         result = self.rewards['step']
 
@@ -290,6 +325,7 @@ class Environment:
     
     def get_test_size(self):
         return len(self.game.answers)
+
 
 
 class EnvironmentDordle:

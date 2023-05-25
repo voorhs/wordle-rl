@@ -27,10 +27,10 @@ class QNetwork(nn.Module):
         
         layers = [nn.Linear(state_size, hidden_size)]
         for _ in range(n_hidden_layers):
-            layers.append(nn.Linear(hidden_size, hidden_size))
+            layers.append(nn.LazyLinear(hidden_size))
         
         self.layers = nn.ModuleList(layers)
-        self.output = nn.Linear(hidden_size, action_size)
+        self.output = nn.LazyLinear(action_size)
 
         forward = self._forward_mlp
         if self.skip:
@@ -96,6 +96,21 @@ class QNetwork(nn.Module):
         for i in layers_ind:
             self.layers[i].load_state_dict(backbone.layers[i].state_dict())
 
+
+class OldQNetwork(nn.Module):
+    def __init__(self, state_size, action_size, seed=0, **kwargs):
+        super().__init__()
+        self.seed = torch.manual_seed(seed)
+
+        self.fc1 = nn.Linear(state_size, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, action_size)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        y = F.relu(self.fc2(x))
+
+        return self.fc3(x+y)
 
 # ======= CONVEX SOLUTION (FAILED YET) ======= 
 

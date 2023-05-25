@@ -2,7 +2,8 @@ import numpy as np
 import itertools as it
 import json
 from scipy.stats import entropy
-from environment.environment import Environment, BaseAction
+from tqdm.contrib.concurrent import process_map
+from tqdm.notebook import tqdm
 
 MISS = np.uint8(0)
 MISPLACED = np.uint8(1)
@@ -46,7 +47,7 @@ class PatternMatrix:
         self.answer_to_ind = dict(zip(answers, it.count()))
 
         # Number of letters, words
-        nl = 5
+        nl = len(guesses[0])
         nw1 = len(guesses)
         nw2 = len(answers)
 
@@ -133,7 +134,7 @@ class PatternMatrix:
 
     def get_word_buckets(self, guess, words):
         """Distribute words to their patterns (buckets) based on the given guess."""
-        buckets = [None] * 3**5
+        buckets = [None for _ in range (3**len(guess))]
         hashes = self.sub([guess], words).flatten()
         for hash, word in zip(hashes, words):
             buckets[hash].append(word)
@@ -149,10 +150,9 @@ def pattern_distributions(guesses, answers, pattern_matrix):
     ------
         distributions: np.ndarray of shape (len(guesses), 243), they're not normalized
     """
-    # pattern_matrix = PatternMatrix()
-    # pattern_matrix.generate(guesses, answers)
+    n_letters = len(guesses[0])
 
-    res = np.zeros((len(guesses), 3**5))
+    res = np.zeros((len(guesses), 3**n_letters))
     tmp = []
     for word in guesses:
         tmp.append(pattern_matrix.guess_to_ind[word])
@@ -176,104 +176,105 @@ def entropies(guesses, answers, pattern_matrix):
     return entropy(distributions, base=2, axis=axis)
 
 
-class EntropyDataCollector:
-    def __init__(self, env: Environment, pattern_matrix: PatternMatrix):
-        self.env = env
+class EntropySolver:
+    def __init__(self, pattern_matrix: PatternMatrix, test_words_list, opening=None):
         self.pattern_matrix = pattern_matrix
+        self.test_words_list = test_words_list
+        self.opening = opening
 
-    def _play_episode(self, i, output, buffer):
+    def _play_episode(self, word):
         guesses = list(self.pattern_matrix.guess_to_ind.keys())
         answers = list(self.pattern_matrix.answer_to_ind.keys())
         
         # to store result
-        score = 0
         steps = 0
-
-        # begin new episode
-        self.env.reset(for_test=True)
-        answer = ''.join(self.env.wordle.answer)
-        if output is not None:
-            with open(output, 'a+') as f:
-                f.write(f'Answer {i}: {answer}\n\n')
-        
-        while not self.env.isover():
-            steps += 1
-            if len(answers) == 1:
-                guess = answers[0]
+        while steps < 6 and len(answers) != 1:
+            if steps == 0:
+                guess = self.opening
             else:
                 # make a guess that has max entropy
                 ents = entropies(guesses, answers, self.pattern_matrix)
                 guess = guesses[ents.argmax()]
-            
-                # this implements Wordle logic
-                pattern = self.pattern_matrix.query(guess, answer)
 
-                # narrow down list of possible answers
-                answers = self.pattern_matrix.filter(guess, pattern, answers)
-            
-            action = BaseAction(guess)
-            state = self.env.state.copy()
-            _, reward, _ = self.env.step(action, output)
-
-            # collect to buffer
-            action_ind = self.pattern_matrix.guess_to_ind[guess]
-            buffer.append((action_ind, state.value))
-            
-            # collect stats
-            score += reward
+            steps += 1
         
-        win = self.env.wordle.win
+            # this implements Wordle logic
+            pattern = self.pattern_matrix.query(guess, word)
 
-        if output is not None:
-            with open(output, 'a') as f:
-                f.write(f'Score: {score}\t{"WIN" if win else "LOSE"}\n\n')
+            # narrow down list of possible answers
+            answers = self.pattern_matrix.filter(guess, pattern, answers)
 
-        # results of episode
-        return score, steps, win
+        iswin = (len(answers) == 1) and (steps < 6)
+
+        return steps+iswin, iswin
     
-    def generate(self, nickname):
-        output = nickname + '.txt'
-
-        # list of (action_ind, state.value)
-        res = []
-
-        # number of test words
-        n_episodes = len(self.env.wordle.answers)
-
-        # rewards and indicators of success
-        all_scores = []
-        all_steps = []
-        all_wins = []
-
-        # hard reset pre-generated answers list
-        self.env.wordle.current_answer = -1
-
-        # play games with all test words
-        for i_episode in range(1, n_episodes+1):
-            score, steps, win = self._play_episode(i_episode, output, res)
-            all_scores.append(score)
-            all_steps.append(steps)
-            all_wins.append(win)
+    def solve(self, n_workers, chunksize):
+        stats = process_map(self._play_episode, self.test_words_list, max_workers=n_workers, chunksize=chunksize)
+        all_steps, all_wins = list(zip(*stats))
 
         # stats
-        scores = sum(all_scores) / len(all_scores)
         steps = sum(all_steps) / len(all_steps)
         wins = sum(all_wins) / len(all_wins) * 100
+        n_letters = len(self.test_words_list[0])
+        test_steps_distribution = np.bincount(all_steps, minlength=n_letters+1)[1:]
+        tsd = ', '.join([f'({i}) {val}\t' for i, val in enumerate(test_steps_distribution, start=1)])
         
         # display result
-        to_print = '\t'.join([
-            f'Mean Score: {scores:.2f}',
+        print(
             f'Mean Steps: {steps:.4f}',
             f'Win Rate: {wins:.2f}%',
-        ])
+            '\n' + tsd,
+            sep='\t'
+        )
 
-        print(to_print)
 
-        with open(output, 'a+') as f:
-            f.write(to_print)
+    def play_episode(self, word):
+        guesses = list(self.pattern_matrix.guess_to_ind.keys())
+        answers = list(self.pattern_matrix.answer_to_ind.keys())
         
-        # save collected data to csv (to use it later for torch dataset)
-        f = open(nickname + '.csv', 'w')
-        for action, state in res:
-            f.write(','.join([str(action)] + [str(i) for i in state]) + '\n')
+        # to store result
+        steps = 0
 
+        while steps < 6 and len(answers) != 1:
+            if steps == 0:
+                guess = self.opening
+            else:
+                # make a guess that has max entropy
+                ents = entropies(guesses, answers, self.pattern_matrix)
+                guess = guesses[ents.argmax()]
+
+            steps += 1
+        
+            # this implements Wordle logic
+            pattern = self.pattern_matrix.query(guess, word)
+            self._report(guess, pattern)
+
+            # narrow down list of possible answers
+            answers = self.pattern_matrix.filter(guess, pattern, answers)
+
+        iswin = (len(answers) == 1) and (steps < 6)
+        if iswin:
+            self._report(answers[0], 242) 
+    
+    def _report(self, guess, pattern):
+        bitmask = self._decode(pattern)
+        res = ''
+
+        for g, p in zip(guess, bitmask):
+            letter = g.upper()
+            if p == 0:
+                res += f'{letter:^7}'
+            elif p == 1:
+                res += f'{"*"+letter+"*":^7}'
+            elif p == 2:
+                res += f"{'**'+letter+'**':^7}"
+
+        print(res)
+    
+    def _decode(self, ternary):
+        n = ternary
+        nums = []
+        for _ in range(5):
+            n, r = divmod(n, 3)
+            nums.append(r)
+        return nums

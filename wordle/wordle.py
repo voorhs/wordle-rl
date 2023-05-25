@@ -36,12 +36,10 @@ class Wordle:
 
         # if some word was guessed [not guesses], then it
         # propability of being sampled on next iterations increases
-        self.positive_weights = None
-        self.negative_weights = None
-        if positive_weights:
-            self.positive_weights = np.full(len(self.answers), fill_value=1e-3)
-        if negative_weights:
-            self.negative_weights = np.full(len(self.answers), fill_value=1e-3)
+        self.positive_weights = positive_weights
+        self.negative_weights = negative_weights
+        self.wins = np.zeros(len(self.answers), dtype=int)
+        self.loses = np.zeros(len(self.answers), dtype=int)
 
     def send_guess(
         self,
@@ -113,12 +111,8 @@ class Wordle:
         # collect stats
         if self.current_answer != -1:
             ind = self.answers_indices[self.current_answer]
-
-            if self.positive_weights is not None:
-                self.positive_weights[ind] += self.iswin()
-
-            if self.negative_weights is not None:
-                self.negative_weights[ind] += self.iswin()   
+            self.wins[ind] += self.iswin()
+            self.loses[ind] += not self.iswin()   
         
         # reset inner data
         self.guesses_made = 0
@@ -138,8 +132,8 @@ class Wordle:
         self.report = f'Answer {ind}: {self.answer}\n'
         
     def _sample_answers(self):
-        p = Wordle._normalize(self.positive_weights)
-        n = Wordle._normalize(self.negative_weights)
+        p = Wordle._normalize(self.wins if self.positive_weights else None)
+        n = Wordle._normalize(self.loses if self.negative_weights else None)
 
         return np.random.choice(
             len(self.answers),
@@ -152,7 +146,9 @@ class Wordle:
             return 0
         if weights is 0:
             return None
-        return weights ** alpha / sum(weights ** alpha)
+        # small constant to prevent zero weight
+        w = weights + 1e-5
+        return w ** alpha / sum(w ** alpha)
 
     @staticmethod
     def _load_vocabulary(path, sep='\n', astype=set):
