@@ -17,7 +17,7 @@ class PrioritizedReplayBuffer:
             "next_state": {"shape": state_size},
             "done": {"dtype": np.bool8},
             # "indexes" and "weights" are generated automatically
-        },
+        }
 
         self.n_step = n_step
         if n_step > 1:

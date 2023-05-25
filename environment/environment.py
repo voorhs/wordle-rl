@@ -1,7 +1,10 @@
 import numpy as np
 import torch
 from collections import defaultdict
-from wordle.wordlenp import Wordle
+from wordle.wordle import Wordle, Dordle
+from environment.action import BaseAction
+from copy import copy as PythonCopy
+from typing import List
 
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -12,7 +15,7 @@ class BaseState:
         """Update state based on agent guess and wordle pattern."""
         raise NotImplementedError()
 
-    def reset(self, answer):
+    def reset(self):
         """Begin new episode."""
         raise NotImplementedError()
 
@@ -26,27 +29,12 @@ class BaseState:
         raise NotImplementedError()
 
 
-class BaseAction:
-    def size(self):
-        """Return size of action space."""
-        raise NotImplementedError()
-
-    def set_action(self, nn_output):
-        raise NotImplementedError()
-
-    def get_word(self):
-        """Return guess corresponding to action instance"""
-        raise NotImplementedError()
-
-    def copy_like(self, nn_output):
-        """Make new action instance of the same class."""
-        raise NotImplementedError()
-
-
 class StateYesNo(BaseState):
     # inspired by https://github.com/andrewkho/wordle-solver/blob/master/deep_rl/wordle/state.py
-    def __init__(self, answer: str = 'hello', steps=6):
-        self.answer = answer
+    def __init__(self, n_letters, n_steps):
+        self.n_letters = n_letters
+        self.steps_left = n_steps
+        self.init_steps = n_steps
 
         # 26 indicators that color of this letter is known
         self.isknown = np.zeros(26)
@@ -54,14 +42,10 @@ class StateYesNo(BaseState):
         # 26 indicators that letter is in answer
         self.isin = np.zeros(26)
 
-        # steps left
-        self.init_steps = steps
-        self.steps = steps
-
         # for each 26 letters of alphabet:
         #   for each 5 letters of word:
         #       no/yes;
-        self.coloring = np.zeros((26, 5, 2))
+        self.coloring = np.zeros((26, self.n_letters, 2))
 
     @property
     def size(self):
@@ -73,11 +57,11 @@ class StateYesNo(BaseState):
     @property
     def value(self):
         # this vector is supposed to be input of DQN network
-        return np.r_[self.isknown, self.isin, self.coloring.ravel(), self.steps]
+        return np.r_[self.isknown, self.isin, self.coloring.ravel(), self.steps_left]
 
-    def step(self, action:BaseAction, pattern, done=None):
-        self.steps -= 1
-        guess = action.get_word()
+    def step(self, action:BaseAction, pattern, done):
+        self.steps_left -= 1
+        guess = action.word
         yes_letters = []
 
         # mark all green letters as 'yes'
@@ -135,21 +119,20 @@ class StateYesNo(BaseState):
     def _getord(letter):
         return ord(letter.upper()) - 65
 
-    # start new episode with new word
-    def reset(self, answer):
-        self.answer = answer
+    # start new episode
+    def reset(self):
         self.isknown *= 0
         self.isin *= 0
-        self.steps = self.init_steps
+        self.steps_left = self.init_steps
         self.coloring *= 0
 
     def copy(self):
-        copy = StateYesNo(answer=self.answer, steps=self.init_steps)
-        copy.isknown = self.isknown.copy()
-        copy.isin = self.isin.copy()
-        copy.steps = self.init_steps
-        copy.coloring = self.coloring.copy()
-        return copy
+        res = StateYesNo(n_letters=self.n_letters, n_steps=self.init_steps)
+        res.isknown = self.isknown.copy()
+        res.isin = self.isin.copy()
+        res.steps_left = self.steps_left
+        res.coloring = self.coloring.copy()
+        return res
 
 
 class StateVocabulary(StateYesNo):
@@ -185,35 +168,66 @@ class StateVocabulary(StateYesNo):
         return copy
 
 
-VOCABULARY = Wordle._load_vocabulary('wordle/guesses.txt', astype=list)
+class StateYesNoDordle(BaseState):
+    def __init__(self, n_letters, n_boards, n_steps=None, states_list=None, freeze_list=None):
+        self.n_letters = n_letters
+        if n_steps is None:
+            n_steps = n_boards + 5
+        self.init_steps = n_steps
+        self.n_boards = n_boards
 
+        if states_list is None:
+            states_list = []
+            for _ in range(self.n_boards):
+                states_list.append(StateYesNo(n_letters, n_steps))
+        
+        self.states_list: List[StateYesNo] = states_list
 
-class ActionVocabulary(BaseAction):
-    """Action is an index of word in list of possible answers."""
+        # indicators of finished games
+        if freeze_list is None:
+            freeze_list = [False for _ in range(self.n_boards)]
+        self.freeze_list = freeze_list
 
-    def __init__(self, nn_output, vocabulary=None):
-        self.value = np.argmax(nn_output)
-        self.vocabulary = vocabulary
-        if vocabulary is None:
-            self.vocabulary = VOCABULARY
-
+    @property
     def size(self):
-        return len(self.vocabulary)
+        res = 0
+        for state in self.states_list:
+            res += state.size
+        return res
+    
+    @property
+    def value(self):
+        res = []
+        for state in self.states_list:
+            res.append(state.value)
+        return np.concatenate(res)
 
-    def set_action(self, nn_output):
-        # nn_output is vector of size as number of all possible guesses
-        # which entries contain estimated q values
-        self.value = np.argmax(nn_output)
+    def step(self, action, pattern_list, done_list):
+        for i in range(self.n_boards):
+            if self.freeze_list[i]:
+                continue
+            self.states_list[i].step(action, pattern_list[i])
+            self.freeze_list[i] |= done_list[i]
+    
+    def reset(self):
+        for i in range(self.n_boards):
+            self.states_list[i].reset()
+            self.freeze_list[i] = False
+    
+    def copy(self):
+        states_list = []
+        for state in self.states_list:
+            states_list.append(state.copy())
 
-    def get_word(self):
-        return self.vocabulary[self.value]
+        return StateYesNoDordle(
+            n_letters=self.n_letters,
+            n_steps=self.init_steps,
+            n_boards=self.n_boards,
+            states_list=states_list,
+            freeze_list=PythonCopy(self.freeze_list)
+        )
 
-    def copy_like(self, nn_output):
-        return ActionVocabulary(nn_output, self.vocabulary)
 
-
-# разделить методы на основные и вспомогательные
-# чтобы стороннему человеку было легче вникнуть в алгоритм
 class Environment:
     def __init__(
         self, rewards: defaultdict, wordle: Wordle = None, state_instance: BaseState = None
@@ -222,42 +236,69 @@ class Environment:
         self.rewards = rewards
 
         # instance of Wordle game, which we use for getting color pattern
-        self.wordle = wordle
         if wordle is None:
-            self.wordle = Wordle()
+            wordle = Wordle()
+        self.game = wordle
 
         # instance of envorinment state, which we use for getting input for DQN network
         self.state = state_instance
         if state_instance is None:
-            self.state = StateYesNo(self.wordle.answer)
+            self.state = StateYesNo(self.game.answer)
 
         # it's better to remember letters
         self.collected = {color: set() for color in ['B', 'Y', 'G']}
 
-    def step(self, action: BaseAction, output=None):
+        # for collecting stats
+        self.reward_stats = {key: 0 for key in self.rewards.keys()}
+
+    def step(self, action: BaseAction, output):
         # convert action to str guess
-        guess = action.get_word()
+        guess = action.word
 
         # send guess to Wordle instance
-        pattern = self.wordle.send_guess(guess)
+        pattern = self.game.send_guess(guess, output)
 
         # compute reward from pattern
         reward = self._reward(guess, pattern)
 
         # get to next state of environment
-        self.state.step(action, pattern, self.isover())
+        self.state.step(action, pattern, self.game.isover())
 
-        if output is not None:
-            # print coloring to output file
-            self._print_coloring(output, guess, pattern, reward)
+        return self.state.copy(), reward, self.game.isover()
 
-        return self.state.copy(), reward, self.isover()
+    def disable_reward_logs(self):
+        self._reward = self._reward_logs_off
+    
+    def enable_reward_logs(self):
+        self._reward = self._reward_logs_on
 
-    def _reward(self, guess, pattern):
+    def _reward_logs_on(self, guess, pattern):
+        # to save result
+        result = 0
+
+        def assign_reward(key):
+            rew = self.rewards[key] 
+            self.reward_stats[key] += abs(rew)
+            return rew
+
+        # reward (supposed to be negative) for any guess
+        result += assign_reward('step')
+
+        # reward for each letter
+        for i, color in enumerate(pattern):
+            if guess[i] not in self.collected[color]:
+                result += assign_reward(color)
+                self.collected[color].add(guess[i])
+            elif 'repeat' in self.rewards.keys() and color == 'G':
+                result += assign_reward('repeat')
+        
         # if end of episode
-        if self.isover():
-            return self.rewards['win'] if self.wordle.win else self.rewards['lose']
+        if self.game.isover():
+            result += assign_reward('win' if self.game.iswin() else 'lose')
+        
+        return result
 
+    def _reward_logs_off(self, guess, pattern):
         # reward (supposed to be negative) for any guess
         result = self.rewards['step']
 
@@ -266,27 +307,80 @@ class Environment:
             if guess[i] not in self.collected[color]:
                 result += self.rewards[color]
                 self.collected[color].add(guess[i])
+            elif 'repeat' in self.rewards.keys() and color == 'G':
+                result += self.rewards['repeat']
+        
+        # if end of episode
+        if self.game.isover():
+            result += self.rewards['win'] if self.game.iswin() else self.rewards['lose']
+        
         return result
 
-    def reset(self, replace=True):
-        self.wordle.reset(replace)
-        self.state.reset(self.wordle.answer)
+    def reset(self, for_test=None):
+        self.game.reset(for_test)
+        self.state.reset()
         self.collected = {color: set() for color in ['B', 'Y', 'G']}
+        
+        return self.state.copy()
+    
+    def get_test_size(self):
+        return len(self.game.answers)
+
+
+
+class EnvironmentDordle:
+    def __init__(self, rewards, n_boards, dordle: Dordle, state_instance: BaseState):
+        self.rewards = rewards
+        self.n_boards = n_boards
+        self.game = dordle
+        self.state = state_instance
+
+        self.collected = self._empty_collected_list()
+    
+    def _empty_collected_list(self):
+        return [{color: set() for color in ['B', 'Y', 'G']} for _ in range(self.n_boards)]
+
+    def step(self, action: BaseAction, output):
+        guess = action.word
+
+        # send to all boards
+        pattern_list, isover_list = self.game.send_guess(guess, output)
+        
+        # compute reward
+        reward = self._reward(guess, pattern_list)
+        
+        # change state
+        self.state.step(action, pattern_list, isover_list)
+
+        return self.state.copy(), reward, self.game.isover()
+    
+    def _reward(self, guess, pattern_list):
+        result = self.rewards['step']
+
+        for collected, pattern in zip(self.collected, pattern_list):
+            # if board is over not to give any reward
+            if pattern is None:
+                continue
+            
+            for letter, color in zip(guess, pattern):
+                if letter not in collected[color]:
+                    # reward for new letters
+                    result += self.rewards[color]
+                    collected[color].add(letter)
+                elif 'repeat' in self.rewards.keys() and color == 'G':
+                    # negative reward for repetition of green letters
+                    result += self.rewards['repeat']
+        
+        if self.game.isover():
+            result += self.rewards['win'] if self.game.iswin() else self.rewards['lose']
+        
+        return result
+    
+    def reset(self, for_test=False):
+        self.game.reset(for_test)
+        self.state.reset()
+        self.collected = self._empty_collected_list()
         return self.state.copy()
 
-    def isover(self):
-        # indicator of terminal state (end of episode)
-        return self.wordle.isover()
-
-    def _print_coloring(self, output, guess, pattern, reward):
-        with open(output, mode='a') as f:
-            for i, p in enumerate(pattern):
-                if p == 'B':
-                    f.write('{:^7}'.format(guess[i].upper()))
-                elif p == 'Y':
-                    f.write('{:^7}'.format('*'+guess[i].upper()+'*'))
-                elif p == 'G':
-                    f.write('{:^7}'.format('**'+guess[i].upper()+'**'))
-            f.write(f'\treward: {reward}\n')    # end of word line
-            if self.isover():
-                f.write('\n')   # end of wordle board
+    def get_test_size(self):
+        return len(self.game.boardwise_answers)
