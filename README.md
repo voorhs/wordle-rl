@@ -26,9 +26,9 @@ Wordle is implemented [here](https://github.com/voorhs/wordle-rl/blob/main/wordl
 
 Let Q-function be a mapping from state-action pair to expected return till the end of an episode:
 
-$$
+```math
 q_\pi(s,a)=\mathbb{E}_\pi[R_t+R_{t+1}+\ldots+R_T\,|\,S_t=s,A_t=a].
-$$
+```
 
 The Q-learning procedure aims to estimate Q-function.
 
@@ -157,7 +157,7 @@ from Raw Images. 2015. arXiv: 1506.07365 [cs.LG].
 В: Nature 575 (нояб. 2019). doi: 10.1038/s41586-019-1724-z.
 9. Brandon Amos, Lei Xu и J. Zico Kolter. Input Convex Neural Networks. 2017. arXiv: 1609.07152
 [cs.LG].
-
+10. Silver, et al. Mastering the game of Go with deep neural networks and tree search. Nature 529, 484–489 (2016).
 
 ## API
 
