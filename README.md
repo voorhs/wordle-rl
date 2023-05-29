@@ -35,9 +35,9 @@ The Q-learning procedure aims to estimate Q-function.
 - Collect experience. Collect set of tuples $S_t, A^\pi_t, R_t,S_{t+1}$ from sampling episodes with agent following policy $\pi$ with $\varepsilon$-chance of exploring action.
 - Function approximation. If the sets $\mathcal{S},\mathcal{A}$ are finite, then we can perceive Q-function as some tabular data and simply fill in its fields according to the accumulated experience.
 
-$$
+```math
 Q_{k+1}(S_t,A_t):= (1-\alpha)Q_k(S_t,A_t)+\alpha[R_{t+1}+\gamma\max_{a'} Q_k(S_{t+1},a')].
-$$
+```
 
 - Update policy. Freeze new policy: $\pi'(s):=\arg\max_a Q_\pi(s,a),\ \forall s\in\mathcal{S}$.
 
@@ -55,9 +55,9 @@ When sets $\mathcal{S},\mathcal{A}$ are too large, we may not be able to impleme
 
 **Prioritized replay buffer.** Each entry in the buffer is assigned a priority $p_i$. The first time an entry enters the buffer, it is assigned a priority equal to the maximum among all available. Further, if the entry $(s,a,r,s')$ was used to train the local network, then it is assigned a new priority and the sampling probability $P_i$ are assigned as follows:
 
-$$
+```math
 p_i:=\left|Q_L(s,a)-[r+\max_{a'}Q_T(s',a')]\right|+\varepsilon,\quad P_i:={p_i^\alpha\over\sum_jp_j^\alpha},
-$$
+```
 
 where $\varepsilon$ is a small constant to avoid zero priority, $\alpha$ is used to control how much the priorities will distort sampling: with $\alpha=0$ sampling is uniform, with $\alpha\gg0$ it is highly prioritized. Implementation is [here](https://github.com/voorhs/wordle-rl/blob/main/replay_buffer/cpprb.py) and uses fancy [cpprb package](https://github.com/ymd-h/cpprb).
 
