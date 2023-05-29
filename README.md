@@ -145,16 +145,14 @@ However, if completely new words are added to the large and small lists, then th
 
 1. Volodymyr Mnih et al. Playing Atari with Deep Reinforcement Learning. 2013. arXiv: 1312.5602
 [cs.LG].
-3. Jonathan Olson. Optimal Wordle Solutions. url: https://jonathanolson.net/experiments/
-optimal-wordle-solutions (дата обр. 21.05.2023).
-4. Grant Sanderson. Solving Wordle using information theory. url: https://www.3blue1brown.
-com/lessons/wordle (дата обр. 21.05.2023).
+3. Jonathan Olson. Optimal Wordle Solutions. url: https://jonathanolson.net/experiments/optimal-wordle-solutions (21.05.2023).
+4. Grant Sanderson. Solving Wordle using information theory. url: https://www.3blue1brown.com/lessons/wordle (21.05.2023).
 5. Tom Schaul et al. Prioritized Experience Replay. 2016. arXiv: 1511.05952 [cs.LG].
 6. Manuel Watter et al. Embed to Control: A Locally Linear Latent Dynamics Model for Control
 from Raw Images. 2015. arXiv: 1506.07365 [cs.LG].
 7. Adam Santoro et al. Relational recurrent neural networks. 2018. arXiv: 1806.01822 [cs.LG].
 8. Oriol Vinyals et al. “Grandmaster level in StarCraft II using multi-agent reinforcement learning”.
-В: Nature 575 (нояб. 2019). doi: 10.1038/s41586-019-1724-z.
+В: Nature 575 (Nov 2019). doi: 10.1038/s41586-019-1724-z.
 9. Brandon Amos, Lei Xu и J. Zico Kolter. Input Convex Neural Networks. 2017. arXiv: 1609.07152
 [cs.LG].
 10. Silver, et al. Mastering the game of Go with deep neural networks and tree search. Nature 529, 484–489 (2016).
