@@ -69,7 +69,7 @@ where $\varepsilon$ is a small constant to avoid zero priority, $\alpha$ is used
 
 ## Results
 
-### Metrics and Strategy Analysis
+### Metrics and Policy Analysis
 
 The table below presents the results of training the RL agent in comparison with the MaxEntropy algorithm (G. Sanderson) and the exact solution (J. Olson). My solution is inferior to the entropy one in quality, but not much compared to the exact one.
 
